@@ -101,14 +101,22 @@ export interface OverrideEntry {
 export interface ResolvedConfig {
   /** The fully-resolved base config. */
   base: StackctlConfig;
+  /** Absolute path to the base .stackctl config file. */
+  baseConfigPath?: string;
   /** Active profile name, if selected. */
   profile?: string;
   /** Profile config overlay, if any. */
   profileConfig?: ProfileConfig;
+  /** Path to .stackctl.<profile> config file, if it exists. */
+  profileConfigPath?: string;
   /** Local config overlay (.stackctl.local). */
   localConfig?: ProfileConfig;
+  /** Path to .stackctl.local config file, if it exists. */
+  localConfigPath?: string;
   /** Local profile config overlay (.stackctl.local.<profile>). */
   localProfileConfig?: ProfileConfig;
+  /** Path to .stackctl.local.<profile> config file, if it exists. */
+  localProfileConfigPath?: string;
   /** Override files discovered or provided. */
   overrides: OverrideEntry[];
 }

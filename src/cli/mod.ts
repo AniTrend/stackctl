@@ -1,4 +1,5 @@
 import { Command } from "@cliffy/command";
+import { CompletionsCommand } from "@cliffy/command/completions";
 import { VERSION } from "../version.ts";
 import { initConfig } from "../config/mod.ts";
 import { resolveConfig } from "../config/mod.ts";
@@ -24,6 +25,7 @@ import {
   encryptFile,
 } from "../secrets/mod.ts";
 import {
+  dockerComposeConfig,
   dockerInfo,
   dockerServiceLogs,
   dockerStackPs,
@@ -31,9 +33,18 @@ import {
   dockerStackServices,
   dockerSwarmStatus,
 } from "../docker/mod.ts";
-import { batchCreateEnvs, diffEnvFiles, discoverEnvExamples } from "../env/mod.ts";
+import {
+  batchCreateEnvs,
+  diffEnvFiles,
+  discoverEnvExamples,
+  envDoctor,
+  getEnvStatusList,
+  materializeEnvFromProfile,
+} from "../env/mod.ts";
 import type { EnvDiff } from "../env/types.ts";
 import { basename, dirname } from "@std/path";
+import { planOperation } from "../compose/plan.ts";
+import type { PlanResult } from "../compose/plan.ts";
 
 /**
  * Parse and execute CLI commands.
@@ -54,6 +65,30 @@ export async function main(args: string[]): Promise<number> {
  * Commands are registered here in their skeleton form;
  * full implementations are added in subsequent issues.
  */
+
+/**
+ * Best-effort stack-name completion provider.
+ * Returns stack names discovered from the repository.
+ * Never throws — returns an empty array if config or discovery fails.
+ */
+async function completeStackNames(): Promise<string[]> {
+  try {
+    // Try config-aware discovery first
+    const config = await resolveConfig({ profile: undefined, cwd: Deno.cwd() });
+    const repoRoot = config.base.repoRoot ?? Deno.cwd();
+    const discovery = await discoverComposeFiles({ repoRoot });
+    return Object.keys(discovery.stacks);
+  } catch {
+    // Config not available or invalid — fall back to direct discovery from cwd
+    try {
+      const discovery = await discoverComposeFiles({ repoRoot: Deno.cwd() });
+      return Object.keys(discovery.stacks);
+    } catch {
+      return [];
+    }
+  }
+}
+
 export function buildCli(): Command {
   const cli = new Command()
     .name("stackctl")
@@ -124,7 +159,11 @@ export function buildCli(): Command {
   // --- generate (issue #4) ---
   cli.command("generate", "Generate canonical stack files from per-service Compose sources.")
     .option("--dry-run", "Print generated output without writing files.")
-    .option("--stacks <names:string>", "Comma-separated list of stack names to generate.")
+    .option(
+      "--stacks <names:string>",
+      "Comma-separated list of stack names to generate.",
+      { complete: completeStackNames } as any,
+    )
     .option("--output-dir <path:string>", "Write generated stacks to a specific directory.")
     .option("--profile <name:string>", "Use a specific profile.")
     .option(
@@ -190,7 +229,11 @@ export function buildCli(): Command {
     "render",
     "Resolve ${VAR} placeholders in stack files using service-local env values.",
   )
-    .option("--stacks <names:string>", "Comma-separated list of stack names to render.")
+    .option(
+      "--stacks <names:string>",
+      "Comma-separated list of stack names to render.",
+      { complete: completeStackNames } as any,
+    )
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--strict", "Fail on any unresolved variable.")
     .option("--output-dir <path:string>", "Write rendered output to a specific directory.")
@@ -291,7 +334,11 @@ export function buildCli(): Command {
     .option("--dry-run", "Print planned actions without executing.")
     .option("--detach", "Exit immediately without waiting for services to converge.")
     .option("--prune", "Prune obsolete services.")
-    .option("--stacks <names:string>", "Comma-separated list of stack names to deploy.")
+    .option(
+      "--stacks <names:string>",
+      "Comma-separated list of stack names to deploy.",
+      { complete: completeStackNames } as any,
+    )
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--override <files:string>", "Comma-separated list of override files.")
     .action(async (options: Record<string, unknown>) => {
@@ -367,10 +414,20 @@ export function buildCli(): Command {
     });
 
   // --- down (issue #6) ---
-  cli.command("down", "Remove stacks from Docker Swarm.")
+  cli.command(
+    "down",
+    "Remove Docker Swarm stacks from the cluster.\n" +
+      "WARNING: This is a destructive operation. Running services, networks,\n" +
+      "and associated resources will be removed. Use --dry-run to preview\n" +
+      "without executing, and --yes to skip the confirmation prompt.",
+  )
     .option("--yes", "Skip confirmation prompt.")
     .option("--dry-run", "Print planned actions without executing.")
-    .option("--stacks <names:string>", "Comma-separated list of stack names to remove.")
+    .option(
+      "--stacks <names:string>",
+      "Comma-separated list of stack names to remove.",
+      { complete: completeStackNames } as any,
+    )
     .option("--profile <name:string>", "Use a specific profile.")
     .action(async (options: Record<string, unknown>) => {
       try {
@@ -421,7 +478,11 @@ export function buildCli(): Command {
   // --- status (issue #6) ---
   cli.command("status", "Show stack service status.")
     .option("--json", "Output JSON machine-readable status.")
-    .option("--stacks <names:string>", "Comma-separated list of stack names.")
+    .option(
+      "--stacks <names:string>",
+      "Comma-separated list of stack names.",
+      { complete: completeStackNames } as any,
+    )
     .option("--profile <name:string>", "Use a specific profile.")
     .action(async (options: Record<string, unknown>) => {
       try {
@@ -491,7 +552,11 @@ export function buildCli(): Command {
   // --- logs (issue #6) ---
   cli.command("logs", "Follow service logs.")
     .arguments("[services...:string]")
-    .option("--stacks <names:string>", "Comma-separated list of stack names.")
+    .option(
+      "--stacks <names:string>",
+      "Comma-separated list of stack names.",
+      { complete: completeStackNames } as any,
+    )
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--follow", "Follow log output (default: true).")
     .option("--tail <n:number>", "Number of lines from end (default: all).")
@@ -554,7 +619,11 @@ export function buildCli(): Command {
     .option("--config <path:string>", "Explicit config file path.")
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--override <files:string>", "Comma-separated list of override files.")
-    .option("--stacks <names:string>", "Comma-separated list of stack names.")
+    .option(
+      "--stacks <names:string>",
+      "Comma-separated list of stack names.",
+      { complete: completeStackNames } as any,
+    )
     .option("--prune", "Prune obsolete services on deploy.")
     .option("--detach", "Exit immediately without waiting for services to converge.")
     .action(async (options: Record<string, unknown>) => {
@@ -708,7 +777,11 @@ export function buildCli(): Command {
   cli.command("reload", "Re-render and redeploy only changed stacks without tearing them down.")
     .option("--skip-generate", "Only re-render and re-deploy, do not regenerate stacks.")
     .option("--follow-logs", "Stream logs for deployed stacks after reload.")
-    .option("--stacks <names:string>", "Comma-separated list of stack names to reload.")
+    .option(
+      "--stacks <names:string>",
+      "Comma-separated list of stack names to reload.",
+      { complete: completeStackNames } as any,
+    )
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--config <path:string>", "Explicit path to .stackctl config file.")
     .option("--override <files:string>", "Comma-separated list of override files to apply.")
@@ -1053,28 +1126,70 @@ export function buildCli(): Command {
   // env list
   envCmd.command("list", "List discovered .env.example files and their status.")
     .option("--profile <name:string>", "Use a specific profile for variant lookup.")
+    .option("--paths <paths:string>", "Comma-separated list of service paths to limit listing.")
     .option("--json", "Output machine-readable JSON.")
+    .option("--list", "Extended status listing (example, env, encrypted, profile variants).")
     .action(async (options: Record<string, unknown>) => {
       try {
         const profile = options.profile as string | undefined;
         const jsonOutput = options.json as boolean | undefined;
+        const extendedList = options.list as boolean | undefined;
+        const pathsOpt = options.paths as string | undefined;
+        const paths = pathsOpt
+          ? pathsOpt.split(",").map((s: string) => s.trim()).filter(Boolean)
+          : undefined;
         const cwd = Deno.cwd();
-        const examples = await discoverEnvExamples(cwd, { profile });
 
-        if (jsonOutput) {
-          console.log(JSON.stringify(examples, null, 2));
-        } else {
-          if (examples.length === 0) {
-            console.log("No .env.example files found.");
-            return;
-          }
-          console.log(`${"Service".padEnd(30)} ${"Status".padEnd(12)} Path`);
-          console.log(`${"-".repeat(30)} ${"-".repeat(12)} ${"-".repeat(40)}`);
-          for (const ex of examples) {
-            const icon = ex.status === "present" ? "✓" : ex.status === "outdated" ? "~" : "✗";
+        if (extendedList) {
+          // Extended status listing
+          const statusList = await getEnvStatusList(cwd, { profile, paths });
+          if (jsonOutput) {
+            console.log(JSON.stringify(statusList, null, 2));
+          } else {
+            if (statusList.length === 0) {
+              console.log("No .env files or examples found.");
+              return;
+            }
             console.log(
-              `${ex.serviceName.padEnd(30)} ${(icon + " " + ex.status).padEnd(12)} ${ex.envPath}`,
+              `${"Service".padEnd(28)} ${"Example".padEnd(8)} ${"Env".padEnd(8)} ${
+                "Enc".padEnd(8)
+              } ${"Profile".padEnd(12)} Path`,
             );
+            console.log(
+              `${"-".repeat(28)} ${"-".repeat(8)} ${"-".repeat(8)} ${"-".repeat(8)} ${
+                "-".repeat(12)
+              } ${"-".repeat(40)}`,
+            );
+            for (const entry of statusList) {
+              const exIcon = entry.hasExample ? "✓" : "✗";
+              const envIcon = entry.hasEnv ? "✓" : "✗";
+              const encIcon = entry.hasEncrypted ? "✓" : "✗";
+              const profLabel = entry.profile ?? "(default)";
+              const pathLabel = entry.envPath ?? entry.examplePath ?? "";
+              console.log(
+                `${entry.serviceName.padEnd(28)} ${exIcon.padEnd(8)} ${envIcon.padEnd(8)} ${
+                  encIcon.padEnd(8)
+                } ${profLabel.padEnd(12)} ${pathLabel}`,
+              );
+            }
+          }
+        } else {
+          const examples = await discoverEnvExamples(cwd, { profile, paths });
+          if (jsonOutput) {
+            console.log(JSON.stringify(examples, null, 2));
+          } else {
+            if (examples.length === 0) {
+              console.log("No .env.example files found.");
+              return;
+            }
+            console.log(`${"Service".padEnd(30)} ${"Status".padEnd(12)} Path`);
+            console.log(`${"-".repeat(30)} ${"-".repeat(12)} ${"-".repeat(40)}`);
+            for (const ex of examples) {
+              const icon = ex.status === "present" ? "✓" : ex.status === "outdated" ? "~" : "✗";
+              console.log(
+                `${ex.serviceName.padEnd(30)} ${(icon + " " + ex.status).padEnd(12)} ${ex.envPath}`,
+              );
+            }
           }
         }
       } catch (err: unknown) {
@@ -1087,6 +1202,7 @@ export function buildCli(): Command {
   envCmd.command("create", "Create .env files from .env.example templates.")
     .arguments("[name:string]")
     .option("--profile <name:string>", "Use a specific profile for variant lookup.")
+    .option("--paths <paths:string>", "Comma-separated list of service paths to limit creation.")
     .option("--force", "Overwrite existing .env files.")
     .option("--dry-run", "Print planned changes without writing.")
     .option("--json", "Output machine-readable JSON.")
@@ -1096,9 +1212,19 @@ export function buildCli(): Command {
         const force = options.force as boolean | undefined;
         const dryRun = options.dryRun as boolean | undefined;
         const jsonOutput = options.json as boolean | undefined;
+        const pathsOpt = options.paths as string | undefined;
+        const paths = pathsOpt
+          ? pathsOpt.split(",").map((s: string) => s.trim()).filter(Boolean)
+          : undefined;
         const cwd = Deno.cwd();
 
-        const result = await batchCreateEnvs(cwd, { profile, force, dryRun, serviceName: name });
+        const result = await batchCreateEnvs(cwd, {
+          profile,
+          force,
+          dryRun,
+          serviceName: name,
+          paths,
+        });
 
         if (jsonOutput) {
           console.log(JSON.stringify(result, null, 2));
@@ -1125,14 +1251,19 @@ export function buildCli(): Command {
   envCmd.command("diff", "Show differences between .env.example and .env files.")
     .arguments("[name:string]")
     .option("--profile <name:string>", "Use a specific profile for variant lookup.")
+    .option("--paths <paths:string>", "Comma-separated list of service paths to limit diff.")
     .option("--json", "Output machine-readable JSON.")
     .action(async (options: Record<string, unknown>, name?: string) => {
       try {
         const profile = options.profile as string | undefined;
         const jsonOutput = options.json as boolean | undefined;
+        const pathsOpt = options.paths as string | undefined;
+        const paths = pathsOpt
+          ? pathsOpt.split(",").map((s: string) => s.trim()).filter(Boolean)
+          : undefined;
         const cwd = Deno.cwd();
 
-        const examples = await discoverEnvExamples(cwd, { profile });
+        const examples = await discoverEnvExamples(cwd, { profile, paths });
         const filtered = name
           ? examples.filter((e) =>
             e.serviceName === name || basename(dirname(e.examplePath)) === name
@@ -1176,35 +1307,214 @@ export function buildCli(): Command {
       }
     });
 
+  // env materialize
+  envCmd.command("materialize", "Materialize profile preset env values into .env files.")
+    .option(
+      "--from-profile <name:string>",
+      "Profile from which to source values (required).",
+      { required: true },
+    )
+    .option(
+      "--paths <paths:string>",
+      "Comma-separated list of service paths to limit materialization.",
+    )
+    .option("--force", "Overwrite existing .env files.")
+    .option("--dry-run", "Print planned changes without writing.")
+    .option("--json", "Output machine-readable JSON.")
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const fromProfile = options.fromProfile as string;
+        const force = options.force as boolean | undefined;
+        const dryRun = options.dryRun as boolean | undefined;
+        const jsonOutput = options.json as boolean | undefined;
+        const pathsOpt = options.paths as string | undefined;
+        const paths = pathsOpt
+          ? pathsOpt.split(",").map((s: string) => s.trim()).filter(Boolean)
+          : undefined;
+        const cwd = Deno.cwd();
+
+        if (!fromProfile) {
+          console.error("error: --from-profile is required");
+          Deno.exit(ExitCode.UserConfigError);
+        }
+
+        const result = await materializeEnvFromProfile(cwd, {
+          profile: fromProfile,
+          force,
+          dryRun,
+          paths,
+        });
+
+        if (jsonOutput) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          const prefix = dryRun ? "[dry-run] would materialize" : "materialized";
+          for (const m of result.materialized) {
+            console.log(`${prefix}: ${m.sourcePath} -> ${m.targetPath}`);
+          }
+          for (const s of result.skipped) {
+            console.log(`skipped: ${s.sourcePath} -> ${s.targetPath} (${s.reason})`);
+          }
+          for (const e of result.errors) {
+            console.error(`error: ${e.serviceName}: ${e.message}`);
+          }
+        }
+
+        if (result.errors.length > 0) Deno.exit(ExitCode.DriftOrValidation);
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
+    });
+
+  // env doctor
+  envCmd.command("doctor", "Check .env files for sensitive plaintext issues.")
+    .option("--paths <paths:string>", "Comma-separated list of service paths to limit check.")
+    .option("--dry-run", "Report what would be checked without logging as errors.")
+    .option("--json", "Output machine-readable JSON.")
+    .option("--suggest", "Suggest commands to fix issues (default: true).")
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const pathsOpt = options.paths as string | undefined;
+        const dryRun = options.dryRun as boolean | undefined;
+        const jsonOutput = options.json as boolean | undefined;
+        const suggest = options.suggest !== false; // default true
+        const paths = pathsOpt
+          ? pathsOpt.split(",").map((s: string) => s.trim()).filter(Boolean)
+          : undefined;
+        const cwd = Deno.cwd();
+
+        const result = await envDoctor(cwd, { paths, dryRun, suggest });
+
+        if (jsonOutput) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          if (result.findings.length === 0) {
+            console.log("No .env files found. Nothing to check.");
+            return;
+          }
+
+          for (const finding of result.findings) {
+            const icon = finding.severity === "warning" ? "⚠" : "ℹ";
+            console.log(`${icon} ${finding.message}`);
+          }
+
+          if (result.hasWarnings) {
+            console.log(
+              "\n⚠ Warnings found. Consider running:",
+            );
+            console.log("  stackctl secrets encrypt  (to encrypt plaintext .env files)");
+            console.log("  stackctl secrets clean    (to remove plaintext after encryption)");
+          } else {
+            console.log("\nNo sensitive plaintext issues detected.");
+          }
+        }
+
+        if (result.hasWarnings) {
+          Deno.exit(ExitCode.DriftOrValidation);
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
+    });
+
   // --- plan (issue #15) ---
   cli.command("plan", "Produce a deterministic plan of what an operation would do.")
     .arguments("<operation:string>")
     .option("--profile <name:string>", "Use a specific profile.")
-    .option("--stacks <names:string>", "Comma-separated list of stack names.")
+    .option("--stacks <names:string>", "Comma-separated list of stack names.", {
+      complete: completeStackNames,
+    })
     .option("--override <files:string>", "Comma-separated list of override files.")
     .option("--json", "Output machine-readable JSON.")
-    .action(() => {
-      console.error("plan: not yet implemented (issue #15)");
-      Deno.exit(1);
+    .description(
+      "Shows a structured summary of what the specified operation would do without executing it.\n\n" +
+        "Supported operations:\n" +
+        "  up       - Preview stack deployment\n" +
+        "  down     - Preview stack removal\n" +
+        "  sync     - Preview full generate+render+deploy pipeline\n" +
+        "  generate - Preview stack generation only\n" +
+        "  render   - Preview rendering only\n" +
+        "  reload   - Preview config-first reload\n" +
+        "  env      - Preview env file scaffolding\n" +
+        "  secrets  - Preview secrets workflow\n" +
+        "  all      - Preview everything",
+    )
+    .example(
+      "Preview what would happen during a sync",
+      "stackctl plan sync",
+    )
+    .example(
+      "Preview with a specific profile",
+      "stackctl plan up --profile staging",
+    )
+    .example(
+      "Preview specific stacks only",
+      "stackctl plan generate --stacks api,web",
+    )
+    .example(
+      "Machine-readable JSON output",
+      "stackctl plan all --json",
+    )
+    .action((opts: Record<string, unknown>, operation: string) => {
+      const profile = opts.profile as string | undefined;
+      const stacks = opts.stacks
+        ? (opts.stacks as string).split(",").map((s: string) => s.trim())
+        : undefined;
+      const overrides = opts.override
+        ? (opts.override as string).split(",").map((s: string) => s.trim())
+        : undefined;
+
+      planOperation({
+        operation,
+        profile,
+        stacks,
+        overrides,
+      })
+        .then((plan: PlanResult) => {
+          if (opts.json) {
+            console.log(JSON.stringify(plan.json, null, 2));
+            return;
+          }
+
+          // Human-readable output
+          console.log(`Plan: ${plan.operation}`);
+          console.log("=".repeat(40));
+
+          for (const section of plan.sections) {
+            console.log(`\n${section.title}`);
+            console.log("-".repeat(section.title.length));
+            for (const item of section.items) {
+              console.log(item);
+            }
+          }
+
+          if (plan.warnings.length > 0) {
+            console.log("\nWarnings:");
+            for (const w of plan.warnings) {
+              console.log(`  ! ${w}`);
+            }
+          }
+
+          if (plan.errors.length > 0) {
+            console.log("\nErrors:");
+            for (const e of plan.errors) {
+              console.log(`  ✗ ${e}`);
+            }
+            Deno.exit(ExitCode.DriftOrValidation);
+          }
+        })
+        .catch((err: unknown) => {
+          console.error(
+            `error: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          Deno.exit(ExitCode.UnexpectedError);
+        });
     });
 
   // --- completions (issue #10) ---
-  const completionsCmd = cli.command("completions", "Generate shell completion scripts.");
-  completionsCmd.command("bash", "Generate bash completion script.")
-    .action(() => {
-      console.error("completions bash: not yet implemented (issue #10)");
-      Deno.exit(1);
-    });
-  completionsCmd.command("zsh", "Generate zsh completion script.")
-    .action(() => {
-      console.error("completions zsh: not yet implemented (issue #10)");
-      Deno.exit(1);
-    });
-  completionsCmd.command("fish", "Generate fish completion script.")
-    .action(() => {
-      console.error("completions fish: not yet implemented (issue #10)");
-      Deno.exit(1);
-    });
+  cli.command("completions", new CompletionsCommand());
 
   return cli as unknown as Command;
 }

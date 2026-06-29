@@ -176,10 +176,14 @@ export async function resolveConfig(
 
   return {
     base: merged,
+    baseConfigPath: discovery?.configPath,
     profile,
     profileConfig,
+    profileConfigPath: discovery?.profilePath,
     localConfig,
+    localConfigPath: discovery?.localPath,
     localProfileConfig,
+    localProfileConfigPath: discovery?.localProfilePath,
     overrides: [],
   };
 }

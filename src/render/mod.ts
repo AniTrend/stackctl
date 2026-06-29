@@ -5,6 +5,7 @@
  *
  * Pipeline position: Generate -> Override -> Render -> Deploy
  */
+import { join, resolve } from "@std/path";
 import type { ComposeData, ServiceDef, VolumeMount } from "../compose/types.ts";
 
 // ---------------------------------------------------------------------------
@@ -37,11 +38,6 @@ export interface RenderResult {
 
 /**
  * Matches ${VAR}, ${VAR-default}, ${VAR:-default}.
- *
- * Groups:
- *   name - variable name
- *   sep  - separator: "-" or ":-"
- *   default - default value
  */
 const INTERP_RE = /\$\{(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:(?<sep>:-|-)\s*(?<default>[^}]*))?\}/g;
 
@@ -56,6 +52,12 @@ const PLAIN_VAR_RE = /(?<!\$)\$(?<name2>[A-Za-z_][A-Za-z0-9_]*)/g;
 const UNRESOLVED_RE = /\$\{[A-Za-z_][A-Za-z0-9_]*\}/;
 
 /**
+ * Matches any leftover plain $VAR patterns (for strict-mode check).
+ * Excludes $$ (escaped dollar) via negative lookbehind.
+ */
+const UNRESOLVED_PLAIN_RE = /(?<!\$)\$[A-Za-z_][A-Za-z0-9_]*/g;
+
+/**
  * Matches a relative path (starts with ./ or ../).
  */
 const REL_PATH_RE = /^\.\.?\//;
@@ -66,11 +68,6 @@ const REL_PATH_RE = /^\.\.?\//;
 
 /**
  * Parse a .env file (simple KEY=VALUE lines) into a dict.
- *
- * - Ignores comments (#) and blank lines.
- * - Supports `export KEY=VALUE` syntax.
- * - Strips surrounding quotes from values.
- * - Throws if the file cannot be read.
  */
 export async function parseEnvFile(path: string): Promise<Record<string, string>> {
   const result: Record<string, string> = {};
@@ -86,24 +83,20 @@ export async function parseEnvFile(path: string): Promise<Record<string, string>
   }
 
   for (const line of raw.split("\n")) {
-    // Trim and skip blank/comment lines
     const trimmed = line.trim();
     if (trimmed === "" || trimmed.startsWith("#")) continue;
 
-    // Support "export KEY=VALUE" syntax
     let effective = trimmed;
     if (effective.startsWith("export ")) {
       effective = effective.slice(7).trim();
     }
 
-    // Find first "="
     const eqIdx = effective.indexOf("=");
-    if (eqIdx === -1) continue; // skip malformed lines
+    if (eqIdx === -1) continue;
 
     const key = effective.slice(0, eqIdx).trim();
     let value = effective.slice(eqIdx + 1).trim();
 
-    // Strip surrounding quotes (single or double)
     if (
       (value.startsWith('"') && value.endsWith('"')) ||
       (value.startsWith("'") && value.endsWith("'"))
@@ -125,9 +118,6 @@ export async function parseEnvFile(path: string): Promise<Record<string, string>
 
 /**
  * Resolve a service env_file path, trying projectDir first then repoRoot.
- *
- * - Absolute paths are returned as-is.
- * - Relative paths are resolved against projectDir first; if not found, repoRoot.
  */
 export function resolveEnvPath(
   relPath: string,
@@ -137,7 +127,7 @@ export function resolveEnvPath(
   if (relPath.startsWith("/")) return relPath;
 
   // Try projectDir first
-  const fromProject = `${projectDir}/${relPath}`;
+  const fromProject = join(projectDir, relPath);
   try {
     Deno.statSync(fromProject);
     return fromProject;
@@ -146,7 +136,7 @@ export function resolveEnvPath(
   }
 
   // Fallback to repoRoot
-  return `${repoRoot}/${relPath}`;
+  return join(repoRoot, relPath);
 }
 
 // ---------------------------------------------------------------------------
@@ -154,9 +144,7 @@ export function resolveEnvPath(
 // ---------------------------------------------------------------------------
 
 /**
- * Rewrite relative env_file and bind-mount paths to absolute paths
- * so rendered YAML works from a different output directory.
- *
+ * Rewrite relative env_file and bind-mount paths to absolute paths.
  * Does NOT mutate the input service.
  */
 export function absolutizeServicePaths(
@@ -169,7 +157,7 @@ export function absolutizeServicePaths(
   // Absolutize env_file
   if (result.env_file !== undefined) {
     if (Array.isArray(result.env_file)) {
-      result.env_file = result.env_file.map((p) => absolutizePath(p, projectDir, repoRoot));
+      result.env_file = result.env_file.map((p: string) => absolutizePath(p, projectDir, repoRoot));
     } else {
       result.env_file = absolutizePath(
         result.env_file as string,
@@ -181,7 +169,7 @@ export function absolutizeServicePaths(
 
   // Absolutize bind-mount paths in volumes
   if (result.volumes !== undefined) {
-    result.volumes = result.volumes.map((vm) => absolutizeVolumeMount(vm, projectDir));
+    result.volumes = result.volumes.map((vm: VolumeMount) => absolutizeVolumeMount(vm, projectDir));
   }
 
   return result;
@@ -189,7 +177,6 @@ export function absolutizeServicePaths(
 
 /**
  * Make a path absolute by resolving relative to projectDir.
- * Absolute paths and paths with variables are left as-is.
  */
 function absolutizePath(
   path: string,
@@ -198,30 +185,19 @@ function absolutizePath(
 ): string {
   if (path.startsWith("/")) return path;
   if (!REL_PATH_RE.test(path)) {
-    // Might be repo-relative (e.g. "services/app/.env")
-    // Check if exists relative to repoRoot
     return resolveEnvPath(path, projectDir, repoRoot);
   }
-  // Resolve ./ or ../
-  return resolvePath(projectDir, path);
+  return resolve(projectDir, path);
 }
 
 /**
- * Resolve a path without checking existence.
+ * Determine whether a path is a relative bind-mount source.
+ * Returns true for ./ and ../ prefixes, and repo-relative paths like data/logs.
  */
-function resolvePath(base: string, rel: string): string {
-  const parts = rel.split("/");
-  const baseParts = base.split("/").filter(Boolean);
-
-  for (const part of parts) {
-    if (part === "..") {
-      baseParts.pop();
-    } else if (part !== ".") {
-      baseParts.push(part);
-    }
-  }
-
-  return "/" + baseParts.join("/");
+function isRelativeBindSource(path: string): boolean {
+  if (REL_PATH_RE.test(path)) return true;
+  if (!path.startsWith("/") && path.includes("/")) return true;
+  return false;
 }
 
 /**
@@ -236,18 +212,16 @@ function absolutizeVolumeMount(
     return absolutizeBindMountString(mount, projectDir);
   }
 
-  // Long-form dict
   const type = mount.type;
-  if (type === "volume") return mount; // named volumes — skip
+  if (type === "volume") return mount;
 
-  // bind or missing type (treated as bind)
   if (
     typeof mount.source === "string" &&
-    REL_PATH_RE.test(mount.source)
+    isRelativeBindSource(mount.source)
   ) {
     return {
       ...mount,
-      source: resolvePath(projectDir, mount.source),
+      source: resolve(projectDir, mount.source),
     };
   }
   return mount;
@@ -255,9 +229,7 @@ function absolutizeVolumeMount(
 
 /**
  * Absolutize a short-form volume mount string.
- *
- * Format: `[source:]target[:mode]`
- * If the source component is a relative path, absolutize it.
+ * Format: [source:]target[:mode]
  */
 function absolutizeBindMountString(
   mount: string,
@@ -266,9 +238,8 @@ function absolutizeBindMountString(
   const parts = mount.split(":");
   if (parts.length >= 2) {
     const source = parts[0];
-    // If source is a relative bind mount path, absolutize
-    if (REL_PATH_RE.test(source)) {
-      parts[0] = resolvePath(projectDir, source);
+    if (isRelativeBindSource(source)) {
+      parts[0] = resolve(projectDir, source);
       return parts.join(":");
     }
   }
@@ -281,13 +252,6 @@ function absolutizeBindMountString(
 
 /**
  * Normalize service.environment to a dict of strings.
- *
- * Supports both:
- *   - Mapping form: { KEY: value }
- *   - List form: ["KEY=VALUE", ...]
- *
- * Bare keys (no "=" in list form) are skipped.
- * Returns empty dict for null/undefined/missing.
  */
 export function coerceEnvironmentToDict(env: unknown): Record<string, string> {
   if (env === undefined || env === null) return {};
@@ -297,7 +261,7 @@ export function coerceEnvironmentToDict(env: unknown): Record<string, string> {
     for (const item of env) {
       if (typeof item !== "string") continue;
       const eqIdx = item.indexOf("=");
-      if (eqIdx === -1) continue; // bare key — skip
+      if (eqIdx === -1) continue;
       const key = item.slice(0, eqIdx).trim();
       const value = item.slice(eqIdx + 1);
       if (key.length > 0) result[key] = value;
@@ -323,21 +287,19 @@ export function coerceEnvironmentToDict(env: unknown): Record<string, string> {
 // ---------------------------------------------------------------------------
 
 /**
- * Build the variable scope for a service, layering:
- *   1. Shell environment (base)
- *   2. Per-service env_file(s) (in order)
- *   3. service.environment (highest priority)
+ * Build the variable scope for a service.
+ * Layers: shell env -> env_file(s) -> service.environment.
+ * Returns the scope and any warnings about missing env files.
  */
 export async function buildServiceScope(
   service: ServiceDef,
   baseEnv: Record<string, string>,
   projectDir: string,
   repoRoot: string,
-): Promise<Record<string, string>> {
-  // Start with shell env
+): Promise<{ scope: Record<string, string>; warnings: string[] }> {
   const scope: Record<string, string> = { ...baseEnv };
+  const warnings: string[] = [];
 
-  // Layer env_file(s)
   const envFiles = service.env_file;
   if (envFiles) {
     const files = Array.isArray(envFiles) ? envFiles : [envFiles];
@@ -347,19 +309,20 @@ export async function buildServiceScope(
         const vars = await parseEnvFile(resolved);
         Object.assign(scope, vars);
       } catch {
-        // Missing env file — silently skip (warning emitted at renderStack level)
+        warnings.push(
+          `Service env_file "${f}" resolved to "${resolved}" but file not found`,
+        );
       }
     }
   }
 
-  // Layer service.environment (highest priority)
   const serviceEnv = service.environment;
   if (serviceEnv !== undefined) {
     const envDict = coerceEnvironmentToDict(serviceEnv);
     Object.assign(scope, envDict);
   }
 
-  return scope;
+  return { scope, warnings };
 }
 
 // ---------------------------------------------------------------------------
@@ -367,19 +330,9 @@ export async function buildServiceScope(
 // ---------------------------------------------------------------------------
 
 /**
- * Perform ${VAR}, ${VAR-default}, ${VAR:-default} substitution on a single string.
- *
- * Rules:
- *   ${VAR}           — use VAR if defined, else leave as-is
- *   ${VAR-default}   — use VAR if defined (empty counts as defined!), else 'default'
- *   ${VAR:-default}  — use VAR if defined AND non-empty, else 'default'
- *   $VAR             — plain unbraced form (same as ${VAR})
- *   $$               — preserved as $ (handled by negative lookbehind in PLAIN_VAR_RE)
- *
- * Unresolved variables are left as-is.
+ * Perform ${VAR}, ${VAR-default}, ${VAR:-default}, and $VAR substitution.
  */
 export function substitute(s: string, vars: Record<string, string>): string {
-  // Step 1: resolve ${VAR...} patterns
   let result = s.replace(
     INTERP_RE,
     (_match, name: string, sep: string | undefined, defaultValue: string | undefined) => {
@@ -388,38 +341,21 @@ export function substitute(s: string, vars: Record<string, string>): string {
       const varValue = hasVar ? vars[rawVar] : undefined;
 
       if (!hasVar) {
-        // Variable not defined at all
-        if (sep === undefined) {
-          // ${VAR} — leave as-is
-          return _match;
-        }
-        // ${VAR-default} or ${VAR:-default} — use default
+        if (sep === undefined) return _match;
         return defaultValue ?? "";
       }
 
-      if (sep === undefined) {
-        // ${VAR} — use value
-        return varValue ?? "";
-      }
+      if (sep === undefined) return varValue ?? "";
 
-      if (sep === "-") {
-        // ${VAR-default} — use var if defined (even empty)
-        return varValue ?? "";
-      }
+      if (sep === "-") return varValue ?? "";
 
-      // sep === ":-" — use var if defined AND non-empty
-      if (varValue !== undefined && varValue !== "") {
-        return varValue;
-      }
+      if (varValue !== undefined && varValue !== "") return varValue;
       return defaultValue ?? "";
     },
   );
 
-  // Step 2: resolve plain $VAR patterns
   result = result.replace(PLAIN_VAR_RE, (_match, name: string) => {
-    if (name in vars) {
-      return vars[name] ?? "";
-    }
+    if (name in vars) return vars[name] ?? "";
     return _match;
   });
 
@@ -431,36 +367,24 @@ export function substitute(s: string, vars: Record<string, string>): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Recursively interpolate all string values in a value (string/dict/list/scalar).
- *
- * Non-string values (numbers, booleans, null) are passed through unchanged.
- * Objects and arrays are recursed into.
+ * Recursively interpolate all string values in a value.
  */
 export function deepInterpolate(
   obj: unknown,
   vars: Record<string, string>,
 ): unknown {
-  if (typeof obj === "string") {
-    return substitute(obj, vars);
-  }
+  if (typeof obj === "string") return substitute(obj, vars);
 
-  if (Array.isArray(obj)) {
-    return obj.map((item) => deepInterpolate(item, vars));
-  }
+  if (Array.isArray(obj)) return obj.map((item) => deepInterpolate(item, vars));
 
   if (typeof obj === "object" && obj !== null) {
     const result: Record<string, unknown> = {};
-    for (
-      const [key, value] of Object.entries(
-        obj as Record<string, unknown>,
-      )
-    ) {
+    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
       result[key] = deepInterpolate(value, vars);
     }
     return result;
   }
 
-  // Numbers, booleans, null — pass through
   return obj;
 }
 
@@ -470,37 +394,27 @@ export function deepInterpolate(
 
 /**
  * Render a stack/compose data structure with per-service env interpolation.
- *
- * This is the main entry point equivalent to Python's render_compose().
- *
- * Steps:
- *   1. Get shell environment as baseline.
- *   2. For each service, build the variable scope:
- *      shell env -> env_file(s) -> service.environment
- *   3. Recursively interpolate all string values in the service.
- *   4. Absolutize relative paths so rendered YAML works from any directory.
- *   5. Collect warnings for missing env files and unresolved variables.
- *   6. In strict mode: check for leftover ${VAR} patterns and fail if found.
  */
 export async function renderStack(options: RenderOptions): Promise<RenderResult> {
   const { data, projectDir, repoRoot, strict = false } = options;
   const warnings: string[] = [];
 
-  // 1. Get shell environment
   const shellEnv = Deno.env.toObject();
 
-  // 2. Clone the data (shallow) to avoid mutating input
   const rendered: ComposeData = { ...data };
 
-  // 3. Process services
+  // Process services
   if (rendered.services) {
     const services: Record<string, ServiceDef> = {};
 
     for (const [svcName, svc] of Object.entries(rendered.services)) {
-      // Build variable scope for this service
       let scope: Record<string, string>;
       try {
-        scope = await buildServiceScope(svc, shellEnv, projectDir, repoRoot);
+        const result = await buildServiceScope(svc, shellEnv, projectDir, repoRoot);
+        scope = result.scope;
+        for (const w of result.warnings) {
+          warnings.push(`Service "${svcName}": ${w}`);
+        }
       } catch (err: unknown) {
         warnings.push(
           `Service "${svcName}": failed to build env scope: ${
@@ -510,74 +424,58 @@ export async function renderStack(options: RenderOptions): Promise<RenderResult>
         scope = { ...shellEnv };
       }
 
-      // Check for missing env files and warn
-      const envFiles = svc.env_file;
-      if (envFiles) {
-        const files = Array.isArray(envFiles) ? envFiles : [envFiles];
-        for (const f of files) {
-          const resolved = resolveEnvPath(f, projectDir, repoRoot);
-          try {
-            await Deno.stat(resolved);
-          } catch {
-            warnings.push(
-              `Service "${svcName}" references env_file "${f}" but file not found at "${resolved}"`,
-            );
-          }
-        }
-      }
-
-      // Deep interpolate the service
       const interpolated = deepInterpolate(svc, scope) as ServiceDef;
-
-      // Absolutize paths
-      const absolutized = absolutizeServicePaths(
-        interpolated,
-        projectDir,
-        repoRoot,
-      );
-
+      const absolutized = absolutizeServicePaths(interpolated, projectDir, repoRoot);
       services[svcName] = absolutized;
     }
 
     rendered.services = services;
   }
 
-  // 4. Interpolate top-level keys other than services (volumes, networks, etc.)
+  // Interpolate top-level keys
   const topLevelKeys = Object.keys(rendered).filter((k) => k !== "services");
   for (const key of topLevelKeys) {
     const shellScope = { ...shellEnv };
     rendered[key] = deepInterpolate(rendered[key], shellScope);
   }
 
-  // 5. Strict mode check
+  // Strict/non-strict unresolved checks (covers both ${VAR} and plain $VAR)
   let hasUnresolved: boolean | undefined;
   if (strict) {
-    // Stringify the rendered data and check for leftover ${VAR}
-    // We need to check the service values since those are the ones that should be resolved
     hasUnresolved = false;
     for (const [, svc] of Object.entries(rendered.services ?? {})) {
       const svcJson = JSON.stringify(svc);
-      if (UNRESOLVED_RE.test(svcJson)) {
-        hasUnresolved = true;
 
-        // Find which variables remain unresolved for the warning
-        const matches = svcJson.match(
-          /\$\{[A-Za-z_][A-Za-z0-9_]*\}/g,
-        );
-        if (matches) {
-          for (const m of new Set(matches)) {
-            warnings.push(`Unresolved variable in strict mode: ${m}`);
-          }
+      const bracedMatches = svcJson.match(UNRESOLVED_RE);
+      if (bracedMatches) {
+        hasUnresolved = true;
+        for (const m of new Set(bracedMatches)) {
+          warnings.push(`Unresolved variable in strict mode: ${m}`);
+        }
+      }
+
+      const plainMatches = svcJson.match(UNRESOLVED_PLAIN_RE);
+      if (plainMatches) {
+        hasUnresolved = true;
+        for (const m of new Set(plainMatches)) {
+          warnings.push(`Unresolved variable in strict mode: ${m}`);
         }
       }
     }
   } else {
-    // Non-strict: just warn about unresolvable patterns
     for (const [, svc] of Object.entries(rendered.services ?? {})) {
       const svcJson = JSON.stringify(svc);
-      const matches = svcJson.match(/\$\{[A-Za-z_][A-Za-z0-9_]*\}/g);
-      if (matches) {
-        for (const m of new Set(matches)) {
+
+      const bracedMatches = svcJson.match(UNRESOLVED_RE);
+      if (bracedMatches) {
+        for (const m of new Set(bracedMatches)) {
+          warnings.push(`Unresolved variable (left as-is): ${m}`);
+        }
+      }
+
+      const plainMatches = svcJson.match(UNRESOLVED_PLAIN_RE);
+      if (plainMatches) {
+        for (const m of new Set(plainMatches)) {
           warnings.push(`Unresolved variable (left as-is): ${m}`);
         }
       }

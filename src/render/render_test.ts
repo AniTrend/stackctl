@@ -2,6 +2,8 @@
  * Tests for render/compose env interpolation — Issue #5.
  */
 import { assertEquals, assertNotEquals, assertRejects, assertStringIncludes } from "@std/assert";
+import { join } from "@std/path";
+import { stringify as stringifyYaml } from "@std/yaml";
 import {
   absolutizeServicePaths,
   buildServiceScope,
@@ -12,7 +14,7 @@ import {
   resolveEnvPath,
   substitute,
 } from "./mod.ts";
-import type { ServiceDef } from "../compose/types.ts";
+import type { ComposeData, ServiceDef } from "../compose/types.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -23,7 +25,7 @@ async function makeTempDir(): Promise<string> {
 }
 
 async function writeFile(dir: string, name: string, content: string) {
-  await Deno.writeTextFile(`${dir}/${name}`, content);
+  await Deno.writeTextFile(join(dir, name), content);
 }
 
 // ---------------------------------------------------------------------------
@@ -33,42 +35,42 @@ async function writeFile(dir: string, name: string, content: string) {
 Deno.test("parseEnvFile: simple KEY=VALUE", async () => {
   const dir = await makeTempDir();
   await writeFile(dir, ".env", "FOO=bar\nBAZ=qux\n");
-  const result = await parseEnvFile(`${dir}/.env`);
+  const result = await parseEnvFile(join(dir, ".env"));
   assertEquals(result, { FOO: "bar", BAZ: "qux" });
 });
 
 Deno.test("parseEnvFile: lines with comments", async () => {
   const dir = await makeTempDir();
   await writeFile(dir, ".env", "# this is a comment\nFOO=bar\n# another comment\n");
-  const result = await parseEnvFile(`${dir}/.env`);
+  const result = await parseEnvFile(join(dir, ".env"));
   assertEquals(result, { FOO: "bar" });
 });
 
 Deno.test("parseEnvFile: blank lines", async () => {
   const dir = await makeTempDir();
   await writeFile(dir, ".env", "\n\nFOO=bar\n\nBAZ=qux\n\n");
-  const result = await parseEnvFile(`${dir}/.env`);
+  const result = await parseEnvFile(join(dir, ".env"));
   assertEquals(result, { FOO: "bar", BAZ: "qux" });
 });
 
 Deno.test("parseEnvFile: export prefix", async () => {
   const dir = await makeTempDir();
   await writeFile(dir, ".env", "export FOO=bar\nexport BAZ=qux\n");
-  const result = await parseEnvFile(`${dir}/.env`);
+  const result = await parseEnvFile(join(dir, ".env"));
   assertEquals(result, { FOO: "bar", BAZ: "qux" });
 });
 
 Deno.test("parseEnvFile: quoted values", async () => {
   const dir = await makeTempDir();
   await writeFile(dir, ".env", "FOO=\"bar baz\"\nBAZ='qux quux'\nPLAIN=naked\n");
-  const result = await parseEnvFile(`${dir}/.env`);
+  const result = await parseEnvFile(join(dir, ".env"));
   assertEquals(result, { FOO: "bar baz", BAZ: "qux quux", PLAIN: "naked" });
 });
 
 Deno.test("parseEnvFile: file not found throws", async () => {
   const dir = await makeTempDir();
   await assertRejects(
-    () => parseEnvFile(`${dir}/nonexistent.env`),
+    () => parseEnvFile(join(dir, "nonexistent.env")),
     Error,
     "Env file not found",
   );
@@ -77,7 +79,7 @@ Deno.test("parseEnvFile: file not found throws", async () => {
 Deno.test("parseEnvFile: malformed lines skipped", async () => {
   const dir = await makeTempDir();
   await writeFile(dir, ".env", "NO_EQUALS\nFOO=bar\n");
-  const result = await parseEnvFile(`${dir}/.env`);
+  const result = await parseEnvFile(join(dir, ".env"));
   assertEquals(result, { FOO: "bar" });
 });
 
@@ -93,9 +95,8 @@ Deno.test("resolveEnvPath: absolute path returned as-is", () => {
 Deno.test("resolveEnvPath: relative path resolved against projectDir", async () => {
   const dir = await makeTempDir();
   await writeFile(dir, ".env", "FOO=bar\n");
-  // File is at <dir>/.env, projectDir is <dir>
   const result = resolveEnvPath(".env", dir, "/never");
-  assertEquals(result, `${dir}/.env`);
+  assertEquals(result, join(dir, ".env"));
 });
 
 Deno.test("resolveEnvPath: relative path falls back to repoRoot", () => {
@@ -105,7 +106,7 @@ Deno.test("resolveEnvPath: relative path falls back to repoRoot", () => {
 
 Deno.test("resolveEnvPath: ./ prefix handling", () => {
   const result = resolveEnvPath("./config.env", "/nonexistent", "/repo");
-  assertEquals(result, "/repo/./config.env");
+  assertEquals(result, "/repo/config.env");
 });
 
 // ---------------------------------------------------------------------------
@@ -198,7 +199,7 @@ Deno.test("substitute: ${VAR} substitution", () => {
 
 Deno.test("substitute: ${VAR-default} — empty VAR counts as defined", () => {
   const result = substitute("${VAR-fallback}", { VAR: "" });
-  assertEquals(result, ""); // empty string is defined, so use it
+  assertEquals(result, "");
 });
 
 Deno.test("substitute: ${VAR-default} — undefined VAR uses default", () => {
@@ -244,10 +245,7 @@ Deno.test("substitute: mixed patterns", () => {
 });
 
 Deno.test("substitute: default with spaces in value", () => {
-  const result = substitute(
-    "${VAR:-default value with spaces}",
-    {},
-  );
+  const result = substitute("${VAR:-default value with spaces}", {});
   assertEquals(result, "default value with spaces");
 });
 
@@ -307,18 +305,15 @@ Deno.test("buildServiceScope: layers shell -> env_file -> environment", async ()
   await writeFile(dir, ".env", "DB_HOST=from_file\nDB_PORT=5432\n");
 
   const svc: ServiceDef = {
-    env_file: `${dir}/.env`,
+    env_file: join(dir, ".env"),
     environment: { DB_HOST: "from_env" },
   };
 
   const shellEnv = { SHELL_ONLY: "yes", DB_HOST: "from_shell" };
 
-  const scope = await buildServiceScope(svc, shellEnv, dir, dir);
-  // Shell env provides base
+  const { scope } = await buildServiceScope(svc, shellEnv, dir, dir);
   assertEquals(scope.SHELL_ONLY, "yes");
-  // env_file layers on top
   assertEquals(scope.DB_PORT, "5432");
-  // service.environment wins over both
   assertEquals(scope.DB_HOST, "from_env");
 });
 
@@ -328,24 +323,27 @@ Deno.test("buildServiceScope: multiple env_files layered in order", async () => 
   await writeFile(dir, ".env.override", "B=override\nC=override");
 
   const svc: ServiceDef = {
-    env_file: [`${dir}/.env.base`, `${dir}/.env.override`],
+    env_file: [join(dir, ".env.base"), join(dir, ".env.override")],
   };
 
-  const scope = await buildServiceScope(svc, {}, dir, dir);
+  const { scope } = await buildServiceScope(svc, {}, dir, dir);
   assertEquals(scope.A, "base");
   assertEquals(scope.B, "override");
   assertEquals(scope.C, "override");
 });
 
-Deno.test("buildServiceScope: missing env_file is silently skipped", async () => {
+Deno.test("buildServiceScope: missing env_file surfaces warning", async () => {
   const dir = await makeTempDir();
   const svc: ServiceDef = {
-    env_file: `${dir}/nonexistent.env`,
+    env_file: join(dir, "nonexistent.env"),
     environment: { FOO: "bar" },
   };
 
-  const scope = await buildServiceScope(svc, {}, dir, dir);
+  const { scope, warnings } = await buildServiceScope(svc, {}, dir, dir);
   assertEquals(scope.FOO, "bar");
+  assertEquals(warnings.length, 1);
+  assertStringIncludes(warnings[0], "nonexistent.env");
+  assertStringIncludes(warnings[0], "not found");
 });
 
 // ---------------------------------------------------------------------------
@@ -360,7 +358,7 @@ Deno.test("renderStack: full render with env files", async () => {
     services: {
       web: {
         image: "nginx",
-        env_file: [`${dir}/app.env`],
+        env_file: [join(dir, "app.env")],
         environment: { CUSTOM: "value" },
         volumes: ["./data:/app/data"],
         command: ["start", "--name=${APP_NAME}", "--port=${APP_PORT}"],
@@ -371,12 +369,8 @@ Deno.test("renderStack: full render with env files", async () => {
 
   const result = await renderStack({ data, projectDir: dir, repoRoot: dir });
   const svc = result.data.services!["web"];
-
-  // Variables should be interpolated
   assertEquals(svc.command, ["start", "--name=myapp", "--port=8080"]);
   assertEquals(svc.labels, { app: "value myapp" });
-
-  // Volume path should be absolutized
   const vol = svc.volumes![0] as string;
   assertEquals(vol.startsWith("/"), true);
 });
@@ -391,34 +385,17 @@ Deno.test("renderStack: strict mode detects unresolved", async () => {
     },
   };
 
-  const result = await renderStack({
-    data,
-    projectDir: "/tmp",
-    repoRoot: "/tmp",
-    strict: true,
-  });
-
+  const result = await renderStack({ data, projectDir: "/tmp", repoRoot: "/tmp", strict: true });
   assertEquals(result.hasUnresolved, true);
   assertEquals(result.warnings.some((w) => w.includes("Unresolved variable")), true);
 });
 
 Deno.test("renderStack: non-strict leaves unresolved as-is", async () => {
   const data = {
-    services: {
-      web: {
-        image: "nginx",
-        command: "${MISSING_VAR}",
-      },
-    },
+    services: { web: { image: "nginx", command: "${MISSING_VAR}" } },
   };
 
-  const result = await renderStack({
-    data,
-    projectDir: "/tmp",
-    repoRoot: "/tmp",
-    strict: false,
-  });
-
+  const result = await renderStack({ data, projectDir: "/tmp", repoRoot: "/tmp", strict: false });
   assertEquals(result.hasUnresolved, undefined);
   const cmd = result.data.services!.web.command as string;
   assertEquals(cmd, "${MISSING_VAR}");
@@ -427,12 +404,7 @@ Deno.test("renderStack: non-strict leaves unresolved as-is", async () => {
 Deno.test("renderStack: warnings for missing env files", async () => {
   const dir = await makeTempDir();
   const data = {
-    services: {
-      web: {
-        image: "nginx",
-        env_file: "./nonexistent.env",
-      },
-    },
+    services: { web: { image: "nginx", env_file: "./nonexistent.env" } },
   };
 
   const result = await renderStack({ data, projectDir: dir, repoRoot: dir });
@@ -443,33 +415,22 @@ Deno.test("renderStack: path absolutization", async () => {
   const dir = await makeTempDir();
   const data = {
     services: {
-      web: {
-        image: "nginx",
-        volumes: ["./data:/app/data", "named-vol:/data"],
-      },
+      web: { image: "nginx", volumes: ["./data:/app/data", "named-vol:/data"] },
     },
   };
 
   const result = await renderStack({ data, projectDir: dir, repoRoot: dir });
   const vols = result.data.services!["web"].volumes as string[];
-  // Named volume should be unchanged
   assertEquals(vols[1], "named-vol:/data");
-  // Bind mount should be absolute
   assertEquals(vols[0].startsWith("/"), true);
   assertStringIncludes(vols[0], ":/app/data");
 });
 
 Deno.test("renderStack: service.environment in list form", async () => {
   const data = {
-    services: {
-      web: {
-        image: "nginx",
-        environment: ["FOO=${BAR}", "BAZ=qux"],
-      },
-    },
+    services: { web: { image: "nginx", environment: ["FOO=${BAR}", "BAZ=qux"] } },
   };
 
-  // BAR is not set in env, so ${BAR} remains
   const result = await renderStack({ data, projectDir: "/tmp", repoRoot: "/tmp" });
   const env = result.data.services!["web"].environment as string[];
   assertStringIncludes(env[0], "FOO=");
@@ -478,16 +439,120 @@ Deno.test("renderStack: service.environment in list form", async () => {
 Deno.test("renderStack: does not mutate input", async () => {
   const data = {
     services: {
-      web: {
-        image: "nginx",
-        environment: { URL: "${SCHEME}://example.com" },
-      },
+      web: { image: "nginx", environment: { URL: "${SCHEME}://example.com" } },
     },
   };
 
   const originalEnv = (data.services.web.environment as Record<string, string>).URL;
   await renderStack({ data, projectDir: "/tmp", repoRoot: "/tmp" });
-
-  // Input should still have the variable reference
   assertEquals((data.services.web.environment as Record<string, string>).URL, originalEnv);
+});
+
+// ---------------------------------------------------------------------------
+// Strict mode covers plain $VAR (Issue #3)
+// ---------------------------------------------------------------------------
+
+Deno.test("renderStack: strict mode detects plain $VAR", async () => {
+  const data = {
+    services: { web: { image: "nginx", command: "start $UNRESOLVED_PLAIN" } },
+  };
+
+  const result = await renderStack({ data, projectDir: "/tmp", repoRoot: "/tmp", strict: true });
+  assertEquals(result.hasUnresolved, true);
+  assertEquals(result.warnings.some((w) => w.includes("$UNRESOLVED_PLAIN")), true);
+});
+
+Deno.test("renderStack: non-strict warns about plain $VAR", async () => {
+  const data = {
+    services: { web: { image: "nginx", command: "start $MISSING" } },
+  };
+
+  const result = await renderStack({ data, projectDir: "/tmp", repoRoot: "/tmp", strict: false });
+  assertEquals(result.warnings.some((w) => w.includes("$MISSING")), true);
+});
+
+// ---------------------------------------------------------------------------
+// AbsolutizeVolumeMount handles repo-relative paths (Issue #4)
+// ---------------------------------------------------------------------------
+
+Deno.test("absolutizeServicePaths: repo-relative bind mount (data/logs) made absolute", () => {
+  const svc: ServiceDef = { volumes: ["data/logs:/app/logs:ro"] };
+  const result = absolutizeServicePaths(svc, "/project/app", "/repo");
+  assertEquals(result.volumes![0], "/project/app/data/logs:/app/logs:ro");
+});
+
+Deno.test("absolutizeServicePaths: long-form repo-relative bind mount made absolute", () => {
+  const svc: ServiceDef = {
+    volumes: [{ type: "bind", source: "data/logs", target: "/app/logs" }],
+  };
+  const result = absolutizeServicePaths(svc, "/project/app", "/repo");
+  const vm = result.volumes![0] as Record<string, unknown>;
+  assertEquals(vm.source, "/project/app/data/logs");
+});
+
+Deno.test("absolutizeServicePaths: named volumes with no slash left unchanged", () => {
+  const svc: ServiceDef = { volumes: ["data:/app/data"] };
+  const result = absolutizeServicePaths(svc, "/project/app", "/repo");
+  assertEquals(result.volumes![0], "data:/app/data");
+});
+
+// ---------------------------------------------------------------------------
+// Full stack-file render pipeline test (Issue #5)
+// ---------------------------------------------------------------------------
+
+Deno.test("renderStack: full pipeline - YAML input to rendered output file", async () => {
+  const dir = await makeTempDir();
+
+  const stackYaml = stringifyYaml({
+    services: {
+      app: {
+        image: "nginx:${APP_VERSION}",
+        command: "${CMD_PREFIX} --port=${APP_PORT}",
+        environment: { UNRESOLVED: "${MISSING_VAR}" },
+        volumes: ["./data:/app/data"],
+      },
+    },
+  });
+  await writeFile(dir, "stack.yml", stackYaml);
+
+  await writeFile(
+    dir,
+    "app.env",
+    "APP_VERSION=1.0\nCMD_PREFIX=serve\nAPP_PORT=3000\nAPP_NAME=testapp\n",
+  );
+
+  const data: ComposeData = {
+    services: {
+      app: {
+        image: "nginx:${APP_VERSION}",
+        command: "${CMD_PREFIX} --port=${APP_PORT}",
+        env_file: [join(dir, "app.env")],
+        environment: { UNRESOLVED: "${MISSING_VAR}" },
+        volumes: ["./data:/app/data"],
+      },
+    },
+  };
+
+  const result = await renderStack({ data, projectDir: dir, repoRoot: dir });
+  const svc = result.data.services!["app"];
+
+  assertEquals(svc.image, "nginx:1.0");
+  assertEquals(svc.command, "serve --port=3000");
+
+  const env = svc.environment as Record<string, string>;
+  assertEquals(env.UNRESOLVED, "${MISSING_VAR}");
+
+  const vol = svc.volumes![0] as string;
+  assertEquals(vol.startsWith("/"), true);
+
+  const outputYaml = stringifyYaml(result.data);
+  const outPath = join(dir, ".rendered", "stack.rendered.yml");
+  await Deno.mkdir(join(dir, ".rendered"), { recursive: true });
+  await Deno.writeTextFile(outPath, outputYaml);
+  const written = await Deno.readTextFile(outPath);
+
+  assertEquals(written.length > 0, true);
+  assertStringIncludes(written, "nginx:1.0");
+  assertStringIncludes(written, "serve --port=3000");
+  assertStringIncludes(written, "${MISSING_VAR}");
 });

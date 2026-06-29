@@ -67,6 +67,7 @@ export function buildCli(): Command {
         detect,
         preset,
         profile,
+        writeGitignore,
         force,
         dryRun,
         cwd: Deno.cwd(),

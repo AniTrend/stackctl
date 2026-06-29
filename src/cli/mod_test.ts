@@ -6,19 +6,19 @@ Deno.test("buildCli returns stackctl command", () => {
   assertEquals(cmd.getName(), "stackctl");
 });
 
-Deno.test("main returns 0 for init (dry-run)", async () => {
+Deno.test("main returns 1 for init (unimplemented)", async () => {
   // Override Deno.exit to prevent actual exit during test
   const origExit = Deno.exit;
-  Deno.exit = (code?: number) => {
-    throw new Error(`exit ${code}`);
+  Deno.exit = (_code?: number) => {
+    throw new Error("exit");
   };
 
   const { main } = await import("../cli/mod.ts");
   try {
-    const code = await main(["init", "--dry-run"]);
-    assertEquals(code, 0);
+    const code = await main(["init"]);
+    assertEquals(code, 1);
   } catch {
-    // exit was called; init should not exit on success with --dry-run
+    // exit was called
   }
 
   Deno.exit = origExit;

@@ -1,4 +1,5 @@
 import { Command } from "@cliffy/command";
+import { CompletionsCommand } from "@cliffy/command/completions";
 import { VERSION } from "../version.ts";
 import { initConfig } from "../config/mod.ts";
 import { resolveConfig } from "../config/mod.ts";
@@ -12,6 +13,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "@std/yaml";
 import { renderStack } from "../render/mod.ts";
 import { RealProcessRunner } from "../process/runner.ts";
 import { sync as syncPipeline } from "../compose/sync.ts";
+import { reloadStacks } from "../compose/reload.ts";
 import {
   dockerInfo,
   dockerServiceLogs,
@@ -59,13 +61,19 @@ export function buildCli(): Command {
   });
 
   // --- init (issue #3) ---
-  cli.command("init", "Generate a commented .stackctl configuration file.")
+  cli.command(
+    "init",
+    "Generate a commented .stackctl configuration file. Detects repository layout to infer stack names, profiles, and default paths. Supports presets, profiles, and dry-run preview.",
+  )
     .option("--detect", "Detect repository layout and infer config values.")
     .option("--preset <name:string>", "Use a preset configuration template.")
     .option("--profile <name:string>", "Create an additional profile config file.")
     .option("--write-gitignore", "Append .stackctl.local and .env to .gitignore.")
     .option("--force", "Overwrite existing .stackctl file.")
     .option("--dry-run", "Print the config that would be written without writing.")
+    .example("Generate a default config interactively", "stackctl init")
+    .example("Detect and preview config before writing", "stackctl init --detect --dry-run")
+    .example("Create a staging profile config", "stackctl init --profile staging --force")
     .action(async (options: Record<string, unknown>) => {
       const detect = options.detect as boolean | undefined;
       const preset = options.preset as string | undefined;
@@ -108,7 +116,10 @@ export function buildCli(): Command {
     });
 
   // --- generate (issue #4) ---
-  cli.command("generate", "Generate canonical stack files from per-service Compose sources.")
+  cli.command(
+    "generate",
+    "Generate canonical Docker Compose stack files from per-service compose sources. Resolves includes and merges per-service files into unified stacks ready for deployment. Supports file overrides, stack filtering, and dry-run output.",
+  )
     .option("--dry-run", "Print generated output without writing files.")
     .option("--stacks <names:string>", "Comma-separated list of stack names to generate.")
     .option("--output-dir <path:string>", "Write generated stacks to a specific directory.")
@@ -116,6 +127,15 @@ export function buildCli(): Command {
     .option(
       "--override <files:string>",
       "Comma-separated list of override files to apply.",
+    )
+    .example("Generate all stacks for the current profile", "stackctl generate")
+    .example(
+      "Preview generated output without writing",
+      "stackctl generate --dry-run --stacks web,api",
+    )
+    .example(
+      "Generate with overrides for production",
+      "stackctl generate --profile production --override override.prod.yml",
     )
     .action(async (options: Record<string, unknown>) => {
       try {
@@ -174,7 +194,9 @@ export function buildCli(): Command {
   // --- render (issue #5) ---
   cli.command(
     "render",
-    "Resolve ${VAR} placeholders in stack files using service-local env values.",
+    "Resolve ${VAR} environment variable placeholders in generated stack files. " +
+      "Reads service-local .env files and interpolates variables into stack YAML before deployment. " +
+      "Supports strict mode for unreferenced variables and custom output directories.",
   )
     .option("--stacks <names:string>", "Comma-separated list of stack names to render.")
     .option("--profile <name:string>", "Use a specific profile.")
@@ -185,6 +207,15 @@ export function buildCli(): Command {
       "Comma-separated list of override files to apply before rendering.",
     )
     .option("--dry-run", "Print rendered output without writing files.")
+    .example("Render all stacks for the current profile", "stackctl render")
+    .example(
+      "Preview rendered output in strict mode",
+      "stackctl render --dry-run --strict --stacks web,api",
+    )
+    .example(
+      "Render to a custom output directory",
+      "stackctl render --output-dir ./rendered --profile production",
+    )
     .action(async (options: Record<string, unknown>) => {
       try {
         const profile = options.profile as string | undefined;
@@ -272,7 +303,10 @@ export function buildCli(): Command {
     });
 
   // --- up (issue #6) ---
-  cli.command("up", "Deploy stacks to Docker Swarm.")
+  cli.command(
+    "up",
+    "Deploy one or more stacks to a Docker Swarm cluster. Runs the full generate-render-deploy pipeline with support for dry-run preview, detached deployment, service pruning, and log following.",
+  )
     .option("--follow-logs", "Follow logs after deploy.")
     .option("--dry-run", "Print planned actions without executing.")
     .option("--detach", "Exit immediately without waiting for services to converge.")
@@ -280,6 +314,10 @@ export function buildCli(): Command {
     .option("--stacks <names:string>", "Comma-separated list of stack names to deploy.")
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--override <files:string>", "Comma-separated list of override files.")
+    .example("Deploy all stacks for the current profile", "stackctl up")
+    .example("Dry-run to preview what would be deployed", "stackctl up --dry-run")
+    .example("Deploy a specific stack and follow logs", "stackctl up --stacks web --follow-logs")
+    .example("Deploy in detached mode with pruning", "stackctl up --detach --prune")
     .action(async (options: Record<string, unknown>) => {
       try {
         const profile = options.profile as string | undefined;
@@ -353,11 +391,17 @@ export function buildCli(): Command {
     });
 
   // --- down (issue #6) ---
-  cli.command("down", "Remove stacks from Docker Swarm.")
+  cli.command(
+    "down",
+    "Remove stacks from a Docker Swarm cluster. Prompts for confirmation unless --yes is passed. Supports dry-run to preview which stacks would be removed and stack filtering to target specific stacks.",
+  )
     .option("--yes", "Skip confirmation prompt.")
     .option("--dry-run", "Print planned actions without executing.")
     .option("--stacks <names:string>", "Comma-separated list of stack names to remove.")
     .option("--profile <name:string>", "Use a specific profile.")
+    .example("Remove all stacks with confirmation", "stackctl down")
+    .example("Remove specific stacks without confirmation", "stackctl down --stacks web,api --yes")
+    .example("Preview which stacks would be removed", "stackctl down --dry-run")
     .action(async (options: Record<string, unknown>) => {
       try {
         const profile = options.profile as string | undefined;
@@ -405,10 +449,16 @@ export function buildCli(): Command {
     });
 
   // --- status (issue #6) ---
-  cli.command("status", "Show stack service status.")
+  cli.command(
+    "status",
+    "Show service and task status for deployed stacks. Outputs human-readable summaries by default or machine-readable JSON with the --json flag. Filter by specific stacks to narrow the scope.",
+  )
     .option("--json", "Output JSON machine-readable status.")
     .option("--stacks <names:string>", "Comma-separated list of stack names.")
     .option("--profile <name:string>", "Use a specific profile.")
+    .example("Show status for all deployed stacks", "stackctl status")
+    .example("Show JSON status for specific stacks", "stackctl status --stacks web,api --json")
+    .example("Show human-readable status for a profile", "stackctl status --profile production")
     .action(async (options: Record<string, unknown>) => {
       try {
         const profile = options.profile as string | undefined;
@@ -475,12 +525,18 @@ export function buildCli(): Command {
     });
 
   // --- logs (issue #6) ---
-  cli.command("logs", "Follow service logs.")
+  cli.command(
+    "logs",
+    "Stream logs from Docker Swarm services in real time. Accepts explicit service names as arguments or discovers services from deployed stacks. Supports following logs continuously and tailing a specified number of recent lines.",
+  )
     .arguments("[services...:string]")
     .option("--stacks <names:string>", "Comma-separated list of stack names.")
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--follow", "Follow log output (default: true).")
     .option("--tail <n:number>", "Number of lines from end (default: all).")
+    .example("Stream logs for all services in the default profile", "stackctl logs")
+    .example("Tail recent logs for specific stacks", "stackctl logs --stacks web,api --tail 50")
+    .example("Follow logs for a specific service by name", "stackctl logs --follow web-prod_app")
     .action(async (options: Record<string, unknown>, ...serviceArgs: string[]) => {
       try {
         const profile = options.profile as string | undefined;
@@ -535,7 +591,10 @@ export function buildCli(): Command {
     });
 
   // --- sync (issue #6) ---
-  cli.command("sync", "Full sync pipeline: generate, render, and deploy stacks.")
+  cli.command(
+    "sync",
+    "Run the full lifecycle pipeline: generate, render, and deploy stacks. Equivalent to running generate, render, and up in sequence with error propagation at each stage. Supports all options from each subcommand for targeted or filtered deployments.",
+  )
     .option("--dry-run", "Preview sync without deploying.")
     .option("--config <path:string>", "Explicit config file path.")
     .option("--profile <name:string>", "Use a specific profile.")
@@ -543,6 +602,12 @@ export function buildCli(): Command {
     .option("--stacks <names:string>", "Comma-separated list of stack names.")
     .option("--prune", "Prune obsolete services on deploy.")
     .option("--detach", "Exit immediately without waiting for services to converge.")
+    .example("Sync all stacks for the default profile", "stackctl sync")
+    .example("Preview the full sync pipeline", "stackctl sync --dry-run --prune")
+    .example(
+      "Sync specific stacks for production",
+      "stackctl sync --stacks web,api --profile production",
+    )
     .action(async (options: Record<string, unknown>) => {
       try {
         const profile = options.profile as string | undefined;
@@ -590,10 +655,16 @@ export function buildCli(): Command {
     });
 
   // --- doctor (issue #6) ---
-  cli.command("doctor", "Check system and project health.")
+  cli.command(
+    "doctor",
+    "Check system and project health by verifying Docker daemon, Swarm mode, config validity, and optional secrets tooling. Reports issues with clear remediation steps to get the environment ready for deployment.",
+  )
     .option("--fix-volumes", "Create missing external volumes.")
     .option("--check-secrets", "Also check for secrets tooling (sops, age).")
     .option("--profile <name:string>", "Use a specific profile.")
+    .example("Run all health checks", "stackctl doctor")
+    .example("Check secrets tooling availability", "stackctl doctor --check-secrets")
+    .example("Run checks with a specific profile", "stackctl doctor --profile staging")
     .action(async (options: Record<string, unknown>) => {
       const issues: string[] = [];
       const checks: string[] = [];
@@ -691,61 +762,157 @@ export function buildCli(): Command {
     });
 
   // --- reload (issue #9) ---
-  cli.command("reload", "Re-render and redeploy stacks without tearing down.")
-    .option("--force-service-update", "Force update all services after deploy.")
-    .option("--no-force-service-update", "Skip force update (config override).")
-    .option("--no-generate", "Skip stack generation step.")
-    .option("--stacks <names:string>", "Comma-separated list of stack names.")
+  cli.command(
+    "reload",
+    "Re-render and redeploy only changed stacks without tearing them down. Generates and renders only modified stacks, then triggers a rolling update in Docker Swarm. Supports force service updates, stack filtering, and skipping the generation step to speed up iterations.",
+  )
+    .option("--skip-generate", "Only re-render and re-deploy, do not regenerate stacks.")
+    .option("--follow-logs", "Stream logs for deployed stacks after reload.")
+    .option("--stacks <names:string>", "Comma-separated list of stack names to reload.")
     .option("--profile <name:string>", "Use a specific profile.")
-    .option("--override <files:string>", "Comma-separated list of override files.")
-    .option("--dry-run", "Print planned actions without executing.")
-    .action(() => {
-      console.error("reload: not yet implemented (issue #9)");
-      Deno.exit(1);
+    .option("--config <path:string>", "Explicit path to .stackctl config file.")
+    .option("--override <files:string>", "Comma-separated list of override files to apply.")
+    .option("--dry-run", "Compare and report planned actions without executing.")
+    .example("Reload all stacks with rolling updates", "stackctl reload")
+    .example(
+      "Force update services for a specific stack",
+      "stackctl reload --stacks web --follow-logs",
+    )
+    .example("Skip generation and preview reload", "stackctl reload --skip-generate --dry-run")
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const dryRun = options.dryRun as boolean | undefined;
+        const skipGenerate = options.skipGenerate as boolean | undefined;
+        const followLogs = options.followLogs as boolean | undefined;
+        const configPath = options.config as string | undefined;
+
+        const stacks = options.stacks
+          ? (options.stacks as string).split(",").map((s: string) => s.trim())
+          : undefined;
+
+        const overrides = options.override
+          ? (options.override as string).split(",").map((s: string) => s.trim())
+          : undefined;
+
+        const config = await resolveConfig({
+          configPath,
+          profile,
+          cwd: Deno.cwd(),
+        });
+
+        const runner = new RealProcessRunner(dryRun ?? false);
+
+        const results = await reloadStacks({
+          config,
+          runner,
+          stacks,
+          skipGenerate,
+          dryRun,
+          followLogs,
+          profile,
+          overrides,
+        });
+
+        // Report results
+        for (const r of results) {
+          const icon = r.action === "deployed"
+            ? "✓"
+            : r.action === "unchanged"
+            ? "·"
+            : r.action === "would-deploy"
+            ? "[dry-run] would deploy"
+            : r.action === "would-skip"
+            ? "[dry-run] unchanged"
+            : "✗";
+          console.log(`${icon} ${r.stack}`);
+          if (r.error) console.error(`  error: ${r.error}`);
+        }
+
+        if (results.some((r) => r.action === "error")) {
+          Deno.exit(ExitCode.DriftOrValidation);
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
     });
 
   // --- secrets (issue #7) ---
-  const secretsCmd = cli.command("secrets", "Manage SOPS/age encrypted secrets.");
-  secretsCmd.command("encrypt", "Encrypt .env files to encrypted output.")
+  const secretsCmd = cli.command(
+    "secrets",
+    "Manage encrypted secrets using SOPS and age. Encrypt, decrypt, deploy, and clean secrets across services. Requires sops and age to be installed on the system PATH.",
+  );
+  secretsCmd.command(
+    "encrypt",
+    "Encrypt plaintext .env files to encrypted output using sops with age keys. Accepts optional service names as arguments to limit which files are processed.",
+  )
     .arguments("[services...:string]")
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--dry-run", "Print planned actions without executing.")
+    .example("Encrypt all service .env files", "stackctl secrets encrypt")
+    .example(
+      "Encrypt specific services with dry-run preview",
+      "stackctl secrets encrypt web api --dry-run",
+    )
     .action(() => {
       console.error("secrets encrypt: not yet implemented (issue #7)");
       Deno.exit(1);
     });
-  secretsCmd.command("decrypt", "Decrypt encrypted .env files to plaintext.")
+  secretsCmd.command(
+    "decrypt",
+    "Decrypt sops-encrypted .env files back to plaintext for local development and debugging. Accepts optional service names to limit the scope.",
+  )
     .arguments("[services...:string]")
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--dry-run", "Print planned actions without executing.")
+    .example("Decrypt all service .env files", "stackctl secrets decrypt")
+    .example("Decrypt specific services for debugging", "stackctl secrets decrypt web --dry-run")
     .action(() => {
       console.error("secrets decrypt: not yet implemented (issue #7)");
       Deno.exit(1);
     });
-  secretsCmd.command("deploy", "Decrypt and deploy stacks with secret values.")
+  secretsCmd.command(
+    "deploy",
+    "Decrypt secrets and deploy stacks with the resolved values. Runs the decryption step followed by the sync pipeline. Supports dry-run mode for preview.",
+  )
     .arguments("[services...:string]")
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--dry-run", "Print planned actions without executing.")
+    .example("Decrypt and deploy all stacks", "stackctl secrets deploy")
+    .example("Deploy specific services with secrets", "stackctl secrets deploy web api --dry-run")
     .action(() => {
       console.error("secrets deploy: not yet implemented (issue #7)");
       Deno.exit(1);
     });
-  secretsCmd.command("clean", "Remove plaintext .env files that have encrypted counterparts.")
+  secretsCmd.command(
+    "clean",
+    "Remove plaintext .env files that have encrypted counterparts. Helps prevent accidental commits of unencrypted secrets. Supports dry-run to preview which files would be removed.",
+  )
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--dry-run", "Print planned actions without executing.")
+    .example("Clean all plaintext .env files with encrypted counterparts", "stackctl secrets clean")
+    .example("Preview which files would be removed", "stackctl secrets clean --dry-run")
     .action(() => {
       console.error("secrets clean: not yet implemented (issue #7)");
       Deno.exit(1);
     });
-  secretsCmd.command("check", "Check secrets tooling availability.")
+  secretsCmd.command(
+    "check",
+    "Verify that sops and age are installed and accessible on the system PATH. Reports version information and helps diagnose secrets tooling setup issues.",
+  )
     .option("--profile <name:string>", "Use a specific profile.")
+    .example("Check that sops and age are available", "stackctl secrets check")
     .action(() => {
       console.error("secrets check: not yet implemented (issue #7)");
       Deno.exit(1);
     });
 
   // --- env (issue #14) ---
-  cli.command("env", "Manage .env files and profile env presets.")
+  cli.command(
+    "env",
+    "Manage .env files and profile env presets. List discovered services and their .env status with --list, create missing .env files from .env.example templates with --recreate, and materialize profile presets into concrete .env files with --materialize.",
+  )
     .option("--list", "List discovered services and .env status.")
     .option("--recreate", "Create missing .env files from .env.example.")
     .option("--force", "Overwrite existing .env files.")
@@ -755,40 +922,45 @@ export function buildCli(): Command {
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--from-profile <name:string>", "Materialize env from a profile preset.")
     .option("--materialize", "Materialize profile preset env values.")
+    .example("List all services and their .env status", "stackctl env --list")
+    .example("Create missing .env files from templates", "stackctl env --recreate --dry-run")
+    .example(
+      "Materialize env from a profile preset",
+      "stackctl env --materialize --from-profile production",
+    )
     .action(() => {
       console.error("env: not yet implemented (issue #14)");
       Deno.exit(1);
     });
 
   // --- plan (issue #15) ---
-  cli.command("plan", "Produce a deterministic plan of what an operation would do.")
+  cli.command(
+    "plan",
+    "Produce a deterministic plan of what a given operation would do without executing it. Shows the sequence of actions that would be performed for up, down, sync, or other operations. Supports JSON output for machine consumption and stack filtering.",
+  )
     .arguments("<operation:string>")
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--stacks <names:string>", "Comma-separated list of stack names.")
     .option("--override <files:string>", "Comma-separated list of override files.")
     .option("--json", "Output machine-readable JSON.")
+    .example("Plan what 'up' would deploy", "stackctl plan up")
+    .example("Plan a sync with stack filtering", "stackctl plan sync --stacks web,api")
+    .example("Plan a down operation with JSON output", "stackctl plan down --json")
     .action(() => {
       console.error("plan: not yet implemented (issue #15)");
       Deno.exit(1);
     });
 
   // --- completions (issue #10) ---
-  const completionsCmd = cli.command("completions", "Generate shell completion scripts.");
-  completionsCmd.command("bash", "Generate bash completion script.")
-    .action(() => {
-      console.error("completions bash: not yet implemented (issue #10)");
-      Deno.exit(1);
-    });
-  completionsCmd.command("zsh", "Generate zsh completion script.")
-    .action(() => {
-      console.error("completions zsh: not yet implemented (issue #10)");
-      Deno.exit(1);
-    });
-  completionsCmd.command("fish", "Generate fish completion script.")
-    .action(() => {
-      console.error("completions fish: not yet implemented (issue #10)");
-      Deno.exit(1);
-    });
+  cli.command("completions", new CompletionsCommand())
+    .description(
+      "Generate shell completion scripts for bash, zsh, fish, and PowerShell.\n" +
+        "Pipe the output to the appropriate location for your shell to enable tab-completion.",
+    )
+    .example("Generate bash completions and source them", "stackctl completions bash")
+    .example("Generate zsh completions", "stackctl completions zsh")
+    .example("Generate fish completions", "stackctl completions fish")
+    .example("Generate PowerShell completions", "stackctl completions powershell");
 
   return cli as unknown as Command;
 }

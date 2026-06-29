@@ -10,11 +10,12 @@
     "lint": "deno lint",
     "test": "deno test --allow-read --allow-write --allow-env --allow-run --allow-sys",
     "coverage": "deno coverage --detailed",
-    "build": "deno compile --output dist/stackctl src/main.ts",
-    "build:darwin:x64": "deno compile --target x86_64-apple-darwin --output dist/stackctl-darwin-x64 src/main.ts",
-    "build:darwin:arm64": "deno compile --target aarch64-apple-darwin --output dist/stackctl-darwin-arm64 src/main.ts",
-    "build:linux:x64": "deno compile --target x86_64-unknown-linux-gnu --output dist/stackctl-linux-x64 src/main.ts",
-    "build:linux:arm64": "deno compile --target aarch64-unknown-linux-gnu --output dist/stackctl-linux-arm64 src/main.ts"
+    "build": "deno compile --allow-read --allow-write --allow-env --allow-run --allow-sys --output dist/stackctl src/main.ts",
+    "build:release": "deno task build:linux-x64 && deno task build:linux-arm64 && deno task build:macos-x64 && deno task build:macos-arm64",
+    "build:linux-x64": "deno compile --allow-read --allow-write --allow-env --allow-run --allow-sys --target x86_64-unknown-linux-gnu --output dist/stackctl-linux-x64 src/main.ts",
+    "build:linux-arm64": "deno compile --allow-read --allow-write --allow-env --allow-run --allow-sys --target aarch64-unknown-linux-gnu --output dist/stackctl-linux-arm64 src/main.ts",
+    "build:macos-x64": "deno compile --allow-read --allow-write --allow-env --allow-run --allow-sys --target x86_64-apple-darwin --output dist/stackctl-macos-x64 src/main.ts",
+    "build:macos-arm64": "deno compile --allow-read --allow-write --allow-env --allow-run --allow-sys --target aarch64-apple-darwin --output dist/stackctl-macos-arm64 src/main.ts"
   },
   "imports": {
     "@cliffy/command": "jsr:@cliffy/command@^1.0.0",

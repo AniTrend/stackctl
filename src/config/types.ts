@@ -59,6 +59,10 @@ export interface EnvConfig {
 export interface SecretsConfig {
   /** Encrypted dotenv file name (default: ".env.enc"). */
   encryptedFileName?: string;
+  /** Path to a file containing the age public key for sops encryption. */
+  ageKeyFile?: string;
+  /** Directory where secrets live (default: repo root). */
+  secretsDir?: string;
 }
 
 export interface CommandsConfig {

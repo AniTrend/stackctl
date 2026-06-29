@@ -4,11 +4,22 @@ import { initConfig } from "../config/mod.ts";
 import { resolveConfig } from "../config/mod.ts";
 import { ExitCode } from "../config/types.ts";
 import { generateStacks } from "../compose/mod.ts";
+import { discoverComposeFiles } from "../compose/mod.ts";
 import type { ComposeData, GenerateOptions } from "../compose/mod.ts";
 import { join, resolve } from "@std/path";
 import { ensureDir, exists } from "@std/fs";
 import { parse as parseYaml, stringify as stringifyYaml } from "@std/yaml";
 import { renderStack } from "../render/mod.ts";
+import { RealProcessRunner } from "../process/runner.ts";
+import { sync as syncPipeline } from "../compose/sync.ts";
+import {
+  dockerInfo,
+  dockerServiceLogs,
+  dockerStackPs,
+  dockerStackRm,
+  dockerStackServices,
+  dockerSwarmStatus,
+} from "../docker/mod.ts";
 
 /**
  * Parse and execute CLI commands.
@@ -262,28 +273,135 @@ export function buildCli(): Command {
 
   // --- up (issue #6) ---
   cli.command("up", "Deploy stacks to Docker Swarm.")
-    .option("--no-logs", "Do not follow logs after deploy.")
+    .option("--follow-logs", "Follow logs after deploy.")
     .option("--dry-run", "Print planned actions without executing.")
-    .option("--skip-generate", "Skip stack generation step.")
-    .option("--allow-unrendered", "Deploy unrendered stack files (not recommended).")
+    .option("--detach", "Exit immediately without waiting for services to converge.")
+    .option("--prune", "Prune obsolete services.")
     .option("--stacks <names:string>", "Comma-separated list of stack names to deploy.")
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--override <files:string>", "Comma-separated list of override files.")
-    .action(() => {
-      console.error("up: not yet implemented (issue #6)");
-      Deno.exit(1);
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const dryRun = options.dryRun as boolean | undefined;
+        const followLogs = options.followLogs as boolean | undefined;
+        const detach = options.detach as boolean | undefined;
+        const prune = options.prune as boolean | undefined;
+
+        const stacks = options.stacks
+          ? (options.stacks as string).split(",").map((s: string) => s.trim())
+          : undefined;
+
+        const overrides = options.override
+          ? (options.override as string).split(",").map((s: string) => s.trim())
+          : undefined;
+
+        const runner = new RealProcessRunner(dryRun ?? false);
+
+        const result = await syncPipeline(runner, {
+          stacks,
+          dryRun,
+          profile,
+          overrides,
+          prune,
+          detach,
+        });
+
+        for (const w of result.warnings) console.error(`warning: ${w}`);
+        for (const e of result.errors) console.error(`error: ${e}`);
+
+        for (const s of result.stacks) {
+          const icon = s.success ? "✓" : "✗";
+          console.log(`${icon} ${s.stack}`);
+          if (s.error) console.error(`  error: ${s.error}`);
+        }
+
+        if (result.errors.length > 0 || result.stacks.some((s) => !s.success)) {
+          Deno.exit(ExitCode.DriftOrValidation);
+        }
+
+        // Follow logs after deploy if requested
+        if (followLogs && !dryRun) {
+          console.log("\n--- Following logs (Ctrl-C to stop) ---");
+          for (const s of result.stacks.filter((s) => s.success)) {
+            try {
+              const svcResult = await dockerStackServices(
+                new RealProcessRunner(false),
+                s.stack,
+              );
+              if (svcResult.success) {
+                const lines = svcResult.stdout.trim().split("\n").filter(Boolean);
+                for (const line of lines) {
+                  try {
+                    const svc = JSON.parse(line);
+                    if (svc.Name) {
+                      await dockerServiceLogs(new RealProcessRunner(false), svc.Name, {
+                        follow: true,
+                        tail: 10,
+                      });
+                    }
+                  } catch { /* skip malformed JSON lines */ }
+                }
+              }
+            } catch { /* logs are best-effort */ }
+          }
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
     });
 
   // --- down (issue #6) ---
   cli.command("down", "Remove stacks from Docker Swarm.")
     .option("--yes", "Skip confirmation prompt.")
     .option("--dry-run", "Print planned actions without executing.")
-    .option("--remove-network", "Also remove the configured overlay network.")
     .option("--stacks <names:string>", "Comma-separated list of stack names to remove.")
     .option("--profile <name:string>", "Use a specific profile.")
-    .action(() => {
-      console.error("down: not yet implemented (issue #6)");
-      Deno.exit(1);
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const dryRun = options.dryRun as boolean | undefined;
+        const skipConfirm = options.yes as boolean | undefined;
+
+        const config = await resolveConfig({ profile, cwd: Deno.cwd() });
+        const repoRoot = config.base.repoRoot ?? Deno.cwd();
+
+        const discovery = await discoverComposeFiles({ repoRoot });
+        const targetStacks = options.stacks
+          ? (options.stacks as string).split(",").map((s: string) => s.trim())
+          : Object.keys(discovery.stacks);
+
+        if (targetStacks.length === 0) {
+          console.log("No stacks to remove.");
+          return;
+        }
+
+        // Confirmation prompt
+        if (!dryRun && !skipConfirm) {
+          console.log("The following stacks will be removed:");
+          for (const s of targetStacks) console.log(`  - ${s}`);
+          const answer = prompt("Proceed? [y/N] ");
+          if (!answer || answer.toLowerCase() !== "y") {
+            console.log("Aborted.");
+            return;
+          }
+        }
+
+        const runner = new RealProcessRunner(dryRun ?? false);
+
+        for (const stackName of targetStacks) {
+          const result = await dockerStackRm(runner, stackName);
+          if (result.success) {
+            console.log(`${dryRun ? "[dry-run] would remove" : "Removed"}: ${stackName}`);
+          } else {
+            console.error(`error removing ${stackName}: ${result.stderr || "failed"}`);
+          }
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
     });
 
   // --- status (issue #6) ---
@@ -291,9 +409,69 @@ export function buildCli(): Command {
     .option("--json", "Output JSON machine-readable status.")
     .option("--stacks <names:string>", "Comma-separated list of stack names.")
     .option("--profile <name:string>", "Use a specific profile.")
-    .action(() => {
-      console.error("status: not yet implemented (issue #6)");
-      Deno.exit(1);
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const jsonOutput = options.json as boolean | undefined;
+
+        const config = await resolveConfig({ profile, cwd: Deno.cwd() });
+        const repoRoot = config.base.repoRoot ?? Deno.cwd();
+
+        const discovery = await discoverComposeFiles({ repoRoot });
+        const targetStacks = options.stacks
+          ? (options.stacks as string).split(",").map((s: string) => s.trim())
+          : Object.keys(discovery.stacks);
+
+        if (targetStacks.length === 0) {
+          console.log(jsonOutput ? "{}" : "No stacks discovered.");
+          return;
+        }
+
+        const runner = new RealProcessRunner(false);
+        const statusResult: Record<string, unknown> = {};
+
+        for (const stackName of targetStacks) {
+          if (jsonOutput) {
+            const svcResult = await dockerStackServices(runner, stackName);
+            const psResult = await dockerStackPs(runner, stackName);
+
+            const services: unknown[] = [];
+            if (svcResult.success) {
+              for (const line of svcResult.stdout.trim().split("\n").filter(Boolean)) {
+                try {
+                  services.push(JSON.parse(line));
+                } catch { /* skip */ }
+              }
+            }
+
+            const tasks: unknown[] = [];
+            if (psResult.success) {
+              for (const line of psResult.stdout.trim().split("\n").filter(Boolean)) {
+                try {
+                  tasks.push(JSON.parse(line));
+                } catch { /* skip */ }
+              }
+            }
+
+            statusResult[stackName] = { services, tasks };
+          } else {
+            console.log(`\n=== ${stackName} ===`);
+            const svcResult = await dockerStackServices(runner, stackName);
+            if (svcResult.success) {
+              console.log(svcResult.stdout || "  (no services)");
+            } else {
+              console.error(`  error: ${svcResult.stderr || "failed to list services"}`);
+            }
+          }
+        }
+
+        if (jsonOutput) {
+          console.log(JSON.stringify(statusResult, null, 2));
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
     });
 
   // --- logs (issue #6) ---
@@ -301,19 +479,114 @@ export function buildCli(): Command {
     .arguments("[services...:string]")
     .option("--stacks <names:string>", "Comma-separated list of stack names.")
     .option("--profile <name:string>", "Use a specific profile.")
-    .action(() => {
-      console.error("logs: not yet implemented (issue #6)");
-      Deno.exit(1);
+    .option("--follow", "Follow log output (default: true).")
+    .option("--tail <n:number>", "Number of lines from end (default: all).")
+    .action(async (options: Record<string, unknown>, ...serviceArgs: string[]) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const follow = options.follow !== false;
+        const tail = options.tail as number | undefined;
+        const services = serviceArgs.length > 0 ? serviceArgs : undefined;
+
+        const config = await resolveConfig({ profile, cwd: Deno.cwd() });
+        const repoRoot = config.base.repoRoot ?? Deno.cwd();
+
+        const runner = new RealProcessRunner(false);
+
+        // If explicit services provided, tail them directly
+        if (services && services.length > 0) {
+          for (const svc of services) {
+            console.log(`=== ${svc} ===`);
+            await dockerServiceLogs(runner, svc, { follow, tail });
+          }
+          return;
+        }
+
+        // Otherwise discover stacks and tail all services
+        const stacks = options.stacks
+          ? (options.stacks as string).split(",").map((s: string) => s.trim())
+          : undefined;
+
+        const discovery = await discoverComposeFiles({ repoRoot });
+        const targetStacks = stacks ?? Object.keys(discovery.stacks);
+
+        for (const stackName of targetStacks) {
+          const svcResult = await dockerStackServices(runner, stackName);
+          if (!svcResult.success) {
+            console.error(`error listing services for ${stackName}: ${svcResult.stderr}`);
+            continue;
+          }
+
+          const lines = svcResult.stdout.trim().split("\n").filter(Boolean);
+          for (const line of lines) {
+            try {
+              const svc = JSON.parse(line);
+              if (svc.Name) {
+                console.log(`=== ${svc.Name} ===`);
+                await dockerServiceLogs(runner, svc.Name, { follow, tail });
+              }
+            } catch { /* skip */ }
+          }
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
     });
 
   // --- sync (issue #6) ---
-  cli.command("sync", "Validate that generated stacks match committed stack files.")
-    .option("--quiet", "Suppress diff output.")
-    .option("--non-interactive", "Skip confirmation; exit 1 on drift.")
+  cli.command("sync", "Full sync pipeline: generate, render, and deploy stacks.")
+    .option("--dry-run", "Preview sync without deploying.")
+    .option("--config <path:string>", "Explicit config file path.")
     .option("--profile <name:string>", "Use a specific profile.")
-    .action(() => {
-      console.error("sync: not yet implemented (issue #6)");
-      Deno.exit(1);
+    .option("--override <files:string>", "Comma-separated list of override files.")
+    .option("--stacks <names:string>", "Comma-separated list of stack names.")
+    .option("--prune", "Prune obsolete services on deploy.")
+    .option("--detach", "Exit immediately without waiting for services to converge.")
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const dryRun = options.dryRun as boolean | undefined;
+        const configPath = options.config as string | undefined;
+        const prune = options.prune as boolean | undefined;
+        const detach = options.detach as boolean | undefined;
+
+        const stacks = options.stacks
+          ? (options.stacks as string).split(",").map((s: string) => s.trim())
+          : undefined;
+
+        const overrides = options.override
+          ? (options.override as string).split(",").map((s: string) => s.trim())
+          : undefined;
+
+        const runner = new RealProcessRunner(dryRun ?? false);
+
+        const result = await syncPipeline(runner, {
+          stacks,
+          dryRun,
+          config: configPath,
+          profile,
+          overrides,
+          prune,
+          detach,
+        });
+
+        for (const w of result.warnings) console.error(`warning: ${w}`);
+        for (const e of result.errors) console.error(`error: ${e}`);
+
+        for (const s of result.stacks) {
+          const icon = dryRun ? "[dry-run]" : s.success ? "✓" : "✗";
+          console.log(`${icon} ${s.stack}`);
+          if (s.error) console.error(`  error: ${s.error}`);
+        }
+
+        if (result.errors.length > 0 || result.stacks.some((s) => !s.success)) {
+          Deno.exit(ExitCode.DriftOrValidation);
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
     });
 
   // --- doctor (issue #6) ---
@@ -321,9 +594,100 @@ export function buildCli(): Command {
     .option("--fix-volumes", "Create missing external volumes.")
     .option("--check-secrets", "Also check for secrets tooling (sops, age).")
     .option("--profile <name:string>", "Use a specific profile.")
-    .action(() => {
-      console.error("doctor: not yet implemented (issue #6)");
-      Deno.exit(1);
+    .action(async (options: Record<string, unknown>) => {
+      const issues: string[] = [];
+      const checks: string[] = [];
+
+      const profile = options.profile as string | undefined;
+      const checkSecrets = options.checkSecrets as boolean | undefined;
+
+      const runner = new RealProcessRunner(false);
+
+      // 1. Check Docker installed and running
+      checks.push("Docker installed and running...");
+      try {
+        const infoResult = await dockerInfo(runner);
+        if (infoResult.success) {
+          checks.push("  ✓ Docker is running");
+        } else {
+          issues.push("Docker is not running or not accessible.");
+        }
+      } catch {
+        issues.push("Docker command not found. Is Docker installed?");
+      }
+
+      // 2. Check Docker Swarm mode
+      checks.push("Docker Swarm mode...");
+      try {
+        const swarm = await dockerSwarmStatus(runner);
+        if (swarm.active) {
+          checks.push(`  ✓ Swarm mode active${swarm.nodeId ? ` (node: ${swarm.nodeId})` : ""}`);
+        } else {
+          issues.push("Docker is not in Swarm mode. Run: docker swarm init");
+        }
+      } catch {
+        issues.push("Could not determine Swarm status.");
+      }
+
+      // 3. Check config file exists and is valid
+      checks.push("Config file...");
+      try {
+        const config = await resolveConfig({ profile, cwd: Deno.cwd() });
+        checks.push(`  ✓ Config resolved (profile: ${config.profile ?? "default"})`);
+        checks.push(`    Project: ${config.base.project || "(unnamed)"}`);
+        checks.push(`    Stack directory: ${config.base.stack.directory}`);
+        checks.push(`    Stack names: ${config.base.stack.names.join(", ") || "(none)"}`);
+
+        // 4. Check override files referenced in config exist
+        for (const override of config.overrides) {
+          const existsInFs = await exists(override.path);
+          if (!existsInFs) {
+            issues.push(`Override file not found: ${override.path}`);
+          } else {
+            checks.push(`  ✓ Override: ${override.path}`);
+          }
+        }
+      } catch (err: unknown) {
+        issues.push(
+          `Config error: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
+      // 5. Check sops/age available (if secrets configured)
+      if (checkSecrets) {
+        checks.push("Secrets tooling...");
+        const sopsOk = await runner.which("sops");
+        const ageOk = await runner.which("age");
+        if (sopsOk) {
+          checks.push("  ✓ sops available");
+        } else {
+          issues.push("sops not found on PATH. Install: https://github.com/getsops/sops");
+        }
+        if (ageOk) {
+          checks.push("  ✓ age available");
+        } else {
+          issues.push("age not found on PATH. Install: https://github.com/FiloSottile/age");
+        }
+      }
+
+      // 6. Check for external volumes (if --fix-volumes)
+      if (options.fixVolumes as boolean | undefined) {
+        checks.push("External volumes: not yet implemented");
+      }
+
+      // Output results
+      console.log("=== stackctl doctor ===\n");
+      for (const c of checks) console.log(c);
+      console.log("");
+
+      if (issues.length > 0) {
+        console.error("Issues found:");
+        for (const issue of issues) console.error(`  ✗ ${issue}`);
+        console.error(`\n${issues.length} issue(s) found.`);
+        Deno.exit(ExitCode.MissingDependency);
+      } else {
+        console.log("All checks passed.");
+      }
     });
 
   // --- reload (issue #9) ---

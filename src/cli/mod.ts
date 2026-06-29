@@ -2,7 +2,7 @@ import { Command } from "@cliffy/command";
 import { VERSION } from "../version.ts";
 import { initConfig } from "../config/mod.ts";
 import { resolveConfig } from "../config/mod.ts";
-import { ExitCode } from "../config/types.ts";
+import { ExitCode, type ResolvedConfig } from "../config/types.ts";
 import { generateStacks } from "../compose/mod.ts";
 import { discoverComposeFiles } from "../compose/mod.ts";
 import type { ComposeData, GenerateOptions } from "../compose/mod.ts";
@@ -13,6 +13,16 @@ import { renderStack } from "../render/mod.ts";
 import { RealProcessRunner } from "../process/runner.ts";
 import { sync as syncPipeline } from "../compose/sync.ts";
 import { reloadStacks } from "../compose/reload.ts";
+import type { ReloadResult } from "../compose/reload.ts";
+import {
+  checkTooling,
+  cleanTempFiles,
+  decryptFile,
+  deploySecrets,
+  discoverDecryptedFiles,
+  discoverEncryptedFiles,
+  encryptFile,
+} from "../secrets/mod.ts";
 import {
   dockerInfo,
   dockerServiceLogs,
@@ -21,6 +31,9 @@ import {
   dockerStackServices,
   dockerSwarmStatus,
 } from "../docker/mod.ts";
+import { batchCreateEnvs, diffEnvFiles, discoverEnvExamples } from "../env/mod.ts";
+import type { EnvDiff } from "../env/types.ts";
+import { basename, dirname } from "@std/path";
 
 /**
  * Parse and execute CLI commands.
@@ -750,7 +763,7 @@ export function buildCli(): Command {
           if (r.error) console.error(`  error: ${r.error}`);
         }
 
-        if (results.some((r) => r.action === "error")) {
+        if (results.some((r: ReloadResult) => r.action === "error")) {
           Deno.exit(ExitCode.DriftOrValidation);
         }
       } catch (err: unknown) {
@@ -761,58 +774,406 @@ export function buildCli(): Command {
 
   // --- secrets (issue #7) ---
   const secretsCmd = cli.command("secrets", "Manage SOPS/age encrypted secrets.");
+
   secretsCmd.command("encrypt", "Encrypt .env files to encrypted output.")
-    .arguments("[services...:string]")
+    .arguments("[files...:string]")
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--dry-run", "Print planned actions without executing.")
-    .action(() => {
-      console.error("secrets encrypt: not yet implemented (issue #7)");
-      Deno.exit(1);
+    .option("--age-key <key:string>", "Explicit age public key for encryption.")
+    .action(async (options: Record<string, unknown>, ...fileArgs: string[]) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const dryRun = options.dryRun as boolean | undefined;
+        const ageKey = options.ageKey as string | undefined;
+
+        let config: ResolvedConfig;
+        try {
+          config = await resolveConfig({ profile, cwd: Deno.cwd() });
+        } catch (err: unknown) {
+          console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+          Deno.exit(ExitCode.MissingDependency);
+        }
+
+        const runner = new RealProcessRunner(dryRun ?? false);
+
+        const sopsOk = await runner.which("sops");
+        if (!sopsOk && !dryRun) {
+          console.error("error: sops is not installed. Install: https://github.com/getsops/sops");
+          Deno.exit(ExitCode.MissingDependency);
+        }
+
+        const files: string[] = fileArgs.length > 0
+          ? fileArgs
+          : await discoverDecryptedFiles(config);
+
+        if (files.length === 0) {
+          console.log("No files to encrypt.");
+          return;
+        }
+
+        let hasErrors = false;
+        for (const file of files) {
+          const result = await encryptFile(file, config, runner, { dryRun, ageKey });
+          if (result.success) {
+            console.log(`${dryRun ? "[dry-run] encrypted" : "encrypted"}: ${file}`);
+          } else {
+            console.error(`error encrypting ${file}: ${result.error}`);
+            hasErrors = true;
+          }
+        }
+
+        if (hasErrors) Deno.exit(ExitCode.DriftOrValidation);
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
     });
+
   secretsCmd.command("decrypt", "Decrypt encrypted .env files to plaintext.")
-    .arguments("[services...:string]")
+    .arguments("[files...:string]")
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--dry-run", "Print planned actions without executing.")
-    .action(() => {
-      console.error("secrets decrypt: not yet implemented (issue #7)");
-      Deno.exit(1);
+    .option("--output <dir:string>", "Directory to write decrypted output.")
+    .option("--age-key <key:string>", "Explicit age key for decryption.")
+    .action(async (options: Record<string, unknown>, ...fileArgs: string[]) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const dryRun = options.dryRun as boolean | undefined;
+        const outputDir = options.output as string | undefined;
+        const ageKey = options.ageKey as string | undefined;
+
+        let config: ResolvedConfig;
+        try {
+          config = await resolveConfig({ profile, cwd: Deno.cwd() });
+        } catch (err: unknown) {
+          console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+          Deno.exit(ExitCode.MissingDependency);
+        }
+
+        const runner = new RealProcessRunner(dryRun ?? false);
+
+        const sopsOk = await runner.which("sops");
+        if (!sopsOk && !dryRun) {
+          console.error("error: sops is not installed. Install: https://github.com/getsops/sops");
+          Deno.exit(ExitCode.MissingDependency);
+        }
+
+        const files: string[] = fileArgs.length > 0
+          ? fileArgs
+          : await discoverEncryptedFiles(config);
+
+        if (files.length === 0) {
+          console.log("No encrypted files to decrypt.");
+          return;
+        }
+
+        let hasErrors = false;
+        for (const file of files) {
+          const result = await decryptFile(file, config, runner, {
+            dryRun,
+            outputDir,
+            ageKey,
+          });
+          if (result.success) {
+            console.log(
+              `${dryRun ? "[dry-run] decrypted" : "decrypted"}: ${file} -> ${result.outputPath}`,
+            );
+          } else {
+            console.error(`error decrypting ${file}: ${result.error}`);
+            hasErrors = true;
+          }
+        }
+
+        if (hasErrors) Deno.exit(ExitCode.DriftOrValidation);
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
     });
+
   secretsCmd.command("deploy", "Decrypt and deploy stacks with secret values.")
-    .arguments("[services...:string]")
+    .arguments("[stack:string]")
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--dry-run", "Print planned actions without executing.")
-    .action(() => {
-      console.error("secrets deploy: not yet implemented (issue #7)");
-      Deno.exit(1);
+    .option("--age-key <key:string>", "Explicit age key.")
+    .action(async (options: Record<string, unknown>, stackArg?: string) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const dryRun = options.dryRun as boolean | undefined;
+        const ageKey = options.ageKey as string | undefined;
+
+        let config: ResolvedConfig;
+        try {
+          config = await resolveConfig({ profile, cwd: Deno.cwd() });
+        } catch (err: unknown) {
+          console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+          Deno.exit(ExitCode.MissingDependency);
+        }
+
+        const runner = new RealProcessRunner(dryRun ?? false);
+
+        const sopsOk = await runner.which("sops");
+        const dockerOk = await runner.which("docker");
+        if (!sopsOk && !dryRun) {
+          console.error("error: sops is not installed. Install: https://github.com/getsops/sops");
+          Deno.exit(ExitCode.MissingDependency);
+        }
+        if (!dockerOk && !dryRun) {
+          console.error("error: docker is not installed or not on PATH.");
+          Deno.exit(ExitCode.MissingDependency);
+        }
+
+        const stacks: string[] = stackArg ? [stackArg] : config.base.stack.names;
+
+        if (stacks.length === 0) {
+          console.log("No stacks configured. Use `stackctl init` to set up.");
+          return;
+        }
+
+        let hasErrors = false;
+        for (const stack of stacks) {
+          const result = await deploySecrets(stack, config, runner, {
+            dryRun,
+            ageKey,
+          });
+
+          if (result.success) {
+            const prefix = dryRun ? "[dry-run] deployed" : "deployed";
+            console.log(`${prefix} ${result.secrets.length} secrets for stack: ${stack}`);
+            for (const secret of result.secrets) {
+              console.log(`  ${dryRun ? "[dry-run]" : "✓"} ${secret}`);
+            }
+          } else {
+            console.error(`error deploying secrets for ${stack}: ${result.error}`);
+            hasErrors = true;
+          }
+        }
+
+        if (hasErrors) Deno.exit(ExitCode.DriftOrValidation);
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
     });
+
   secretsCmd.command("clean", "Remove plaintext .env files that have encrypted counterparts.")
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--dry-run", "Print planned actions without executing.")
-    .action(() => {
-      console.error("secrets clean: not yet implemented (issue #7)");
-      Deno.exit(1);
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const dryRun = options.dryRun as boolean | undefined;
+
+        let config: ResolvedConfig;
+        try {
+          config = await resolveConfig({ profile, cwd: Deno.cwd() });
+        } catch (err: unknown) {
+          console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+          Deno.exit(ExitCode.MissingDependency);
+        }
+
+        const repoRoot = config.base.repoRoot ?? Deno.cwd();
+        const runner = new RealProcessRunner(dryRun ?? false);
+
+        const result = await cleanTempFiles(repoRoot, runner, { dryRun });
+
+        if (result.removedFiles.length === 0) {
+          console.log("Nothing to clean.");
+        } else {
+          const prefix = dryRun ? "[dry-run] would remove" : "removed";
+          for (const f of result.removedFiles) {
+            console.log(`${prefix}: ${f}`);
+          }
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
     });
+
   secretsCmd.command("check", "Check secrets tooling availability.")
     .option("--profile <name:string>", "Use a specific profile.")
-    .action(() => {
-      console.error("secrets check: not yet implemented (issue #7)");
-      Deno.exit(1);
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const profile = options.profile as string | undefined;
+
+        let config: ResolvedConfig | undefined;
+        try {
+          config = await resolveConfig({ profile, cwd: Deno.cwd() });
+        } catch {
+          // Config is optional for the tooling check
+        }
+
+        const runner = new RealProcessRunner(false);
+        const status = await checkTooling(runner);
+
+        console.log("Secrets Tooling Status:");
+        console.log(`  sops: ${status.sops.available ? "✓ available" : "✗ not found"}`);
+        if (status.sops.version) {
+          console.log(`    version: ${status.sops.version}`);
+        }
+        console.log(`  age:  ${status.age.available ? "✓ available" : "✗ not found"}`);
+        if (status.age.version) {
+          console.log(`    version: ${status.age.version}`);
+        }
+
+        if (config?.base.secrets) {
+          console.log("\nConfig:");
+          if (config.base.secrets.ageKeyFile) {
+            console.log(`  ageKeyFile: ${config.base.secrets.ageKeyFile}`);
+          }
+          if (config.base.secrets.encryptedFileName) {
+            console.log(`  encryptedFileName: ${config.base.secrets.encryptedFileName}`);
+          }
+        }
+
+        const bothAvailable = status.sops.available && status.age.available;
+        if (!bothAvailable) {
+          console.error(
+            "\nOne or more secrets tools are missing. Install them to use secrets commands.\n" +
+              "  sops: https://github.com/getsops/sops\n" +
+              "  age:  https://github.com/FiloSottile/age",
+          );
+          Deno.exit(ExitCode.MissingDependency);
+        }
+
+        console.log("\nAll secrets tooling is available.");
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
     });
 
   // --- env (issue #14) ---
-  cli.command("env", "Manage .env files and profile env presets.")
-    .option("--list", "List discovered services and .env status.")
-    .option("--recreate", "Create missing .env files from .env.example.")
+  const envCmd = cli.command(
+    "env",
+    "Manage .env files and profile env presets.",
+  );
+
+  // env list
+  envCmd.command("list", "List discovered .env.example files and their status.")
+    .option("--profile <name:string>", "Use a specific profile for variant lookup.")
+    .option("--json", "Output machine-readable JSON.")
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const jsonOutput = options.json as boolean | undefined;
+        const cwd = Deno.cwd();
+        const examples = await discoverEnvExamples(cwd, { profile });
+
+        if (jsonOutput) {
+          console.log(JSON.stringify(examples, null, 2));
+        } else {
+          if (examples.length === 0) {
+            console.log("No .env.example files found.");
+            return;
+          }
+          console.log(`${"Service".padEnd(30)} ${"Status".padEnd(12)} Path`);
+          console.log(`${"-".repeat(30)} ${"-".repeat(12)} ${"-".repeat(40)}`);
+          for (const ex of examples) {
+            const icon = ex.status === "present" ? "✓" : ex.status === "outdated" ? "~" : "✗";
+            console.log(
+              `${ex.serviceName.padEnd(30)} ${(icon + " " + ex.status).padEnd(12)} ${ex.envPath}`,
+            );
+          }
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
+    });
+
+  // env create
+  envCmd.command("create", "Create .env files from .env.example templates.")
+    .arguments("[name:string]")
+    .option("--profile <name:string>", "Use a specific profile for variant lookup.")
     .option("--force", "Overwrite existing .env files.")
-    .option("--yes", "Skip confirmation.")
     .option("--dry-run", "Print planned changes without writing.")
-    .option("--paths <paths:string>", "Comma-separated list of service paths.")
-    .option("--profile <name:string>", "Use a specific profile.")
-    .option("--from-profile <name:string>", "Materialize env from a profile preset.")
-    .option("--materialize", "Materialize profile preset env values.")
-    .action(() => {
-      console.error("env: not yet implemented (issue #14)");
-      Deno.exit(1);
+    .option("--json", "Output machine-readable JSON.")
+    .action(async (options: Record<string, unknown>, name?: string) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const force = options.force as boolean | undefined;
+        const dryRun = options.dryRun as boolean | undefined;
+        const jsonOutput = options.json as boolean | undefined;
+        const cwd = Deno.cwd();
+
+        const result = await batchCreateEnvs(cwd, { profile, force, dryRun, serviceName: name });
+
+        if (jsonOutput) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          if (dryRun) {
+            for (const c of result.created) console.log(`[dry-run] would create: ${c.path}`);
+            for (const s of result.skipped) {
+              console.log(`[dry-run] would skip: ${s.path} (${s.reason})`);
+            }
+          } else {
+            for (const c of result.created) console.log(`created: ${c.path}`);
+            for (const s of result.skipped) console.log(`skipped: ${s.path} (${s.reason})`);
+          }
+          for (const e of result.errors) console.error(`error: ${e.path}: ${e.message}`);
+        }
+        if (result.errors.length > 0) Deno.exit(ExitCode.DriftOrValidation);
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
+    });
+
+  // env diff
+  envCmd.command("diff", "Show differences between .env.example and .env files.")
+    .arguments("[name:string]")
+    .option("--profile <name:string>", "Use a specific profile for variant lookup.")
+    .option("--json", "Output machine-readable JSON.")
+    .action(async (options: Record<string, unknown>, name?: string) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const jsonOutput = options.json as boolean | undefined;
+        const cwd = Deno.cwd();
+
+        const examples = await discoverEnvExamples(cwd, { profile });
+        const filtered = name
+          ? examples.filter((e) =>
+            e.serviceName === name || basename(dirname(e.examplePath)) === name
+          )
+          : examples;
+
+        if (filtered.length === 0) {
+          console.log(
+            jsonOutput ? "[]" : `No .env.example files found${name ? ` matching "${name}"` : ""}.`,
+          );
+          return;
+        }
+
+        const diffs: EnvDiff[] = [];
+        for (const ex of filtered) {
+          diffs.push(await diffEnvFiles(ex.examplePath, ex.envPath, ex.serviceName));
+        }
+
+        if (jsonOutput) {
+          console.log(JSON.stringify(diffs, null, 2));
+        } else {
+          for (const diff of diffs) {
+            console.log(`\n=== ${diff.serviceName} ===`);
+            if (diff.onlyInExample.length > 0) {
+              console.log("  Missing from .env:");
+              for (const k of diff.onlyInExample) console.log(`    - ${k}`);
+            }
+            if (diff.onlyInEnv.length > 0) {
+              console.log("  Only in .env (not in example):");
+              for (const k of diff.onlyInEnv) console.log(`    + ${k}`);
+            }
+            if (diff.common.length > 0) console.log(`  Common (${diff.common.length} keys)`);
+            if (diff.onlyInExample.length === 0 && diff.onlyInEnv.length === 0) {
+              console.log("  (no differences)");
+            }
+          }
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
     });
 
   // --- plan (issue #15) ---

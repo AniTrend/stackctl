@@ -1,6 +1,10 @@
 import { Command } from "@cliffy/command";
 import { VERSION } from "../version.ts";
 import { initConfig } from "../config/mod.ts";
+import { resolveConfig } from "../config/mod.ts";
+import { ExitCode } from "../config/types.ts";
+import { generateStacks } from "../compose/mod.ts";
+import type { GenerateOptions } from "../compose/mod.ts";
 import { join } from "@std/path";
 import { exists } from "@std/fs";
 
@@ -96,9 +100,52 @@ export function buildCli(): Command {
     .option("--stacks <names:string>", "Comma-separated list of stack names to generate.")
     .option("--output-dir <path:string>", "Write generated stacks to a specific directory.")
     .option("--profile <name:string>", "Use a specific profile.")
-    .action(() => {
-      console.error("generate: not yet implemented (issue #4)");
-      Deno.exit(1);
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const dryRun = options.dryRun as boolean | undefined;
+
+        const config = await resolveConfig({ profile, cwd: Deno.cwd() });
+        const repoRoot = config.base.repoRoot ?? Deno.cwd();
+
+        const genOptions: GenerateOptions = {
+          stacks: options.stacks
+            ? (options.stacks as string).split(",").map((s: string) => s.trim())
+            : undefined,
+          repoRoot,
+          outputDir: options.outputDir as string | undefined,
+          dryRun,
+        };
+
+        const result = await generateStacks(genOptions);
+
+        // Print warnings
+        for (const w of result.warnings) {
+          console.error(`warning: ${w}`);
+        }
+
+        // Print errors
+        if (result.errors.length > 0) {
+          for (const e of result.errors) {
+            console.error(`error: ${e}`);
+          }
+          Deno.exit(ExitCode.DriftOrValidation);
+        }
+
+        if (dryRun) {
+          for (const [name, content] of Object.entries(result.generated)) {
+            console.log(`# --- stack: ${name} ---`);
+            console.log(content);
+          }
+        } else {
+          for (const f of result.files) {
+            console.log(`wrote: ${f}`);
+          }
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
     });
 
   // --- render (issue #5) ---

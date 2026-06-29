@@ -100,6 +100,10 @@ export function buildCli(): Command {
     .option("--stacks <names:string>", "Comma-separated list of stack names to generate.")
     .option("--output-dir <path:string>", "Write generated stacks to a specific directory.")
     .option("--profile <name:string>", "Use a specific profile.")
+    .option(
+      "--override <files:string>",
+      "Comma-separated list of override files to apply.",
+    )
     .action(async (options: Record<string, unknown>) => {
       try {
         const profile = options.profile as string | undefined;
@@ -108,6 +112,11 @@ export function buildCli(): Command {
         const config = await resolveConfig({ profile, cwd: Deno.cwd() });
         const repoRoot = config.base.repoRoot ?? Deno.cwd();
 
+        // Parse override file paths
+        const overrideFiles = options.override
+          ? (options.override as string).split(",").map((s: string) => s.trim()).filter(Boolean)
+          : undefined;
+
         const genOptions: GenerateOptions = {
           stacks: options.stacks
             ? (options.stacks as string).split(",").map((s: string) => s.trim())
@@ -115,6 +124,7 @@ export function buildCli(): Command {
           repoRoot,
           outputDir: options.outputDir as string | undefined,
           dryRun,
+          overrides: overrideFiles,
         };
 
         const result = await generateStacks(genOptions);

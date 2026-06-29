@@ -14,16 +14,12 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: stackctl-linux-x64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: stackctl-linux-arm64
           - target: x86_64-apple-darwin
             os: macos-latest
-            artifact: stackctl-macos-x64
           - target: aarch64-apple-darwin
             os: macos-latest
-            artifact: stackctl-macos-arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -41,15 +37,25 @@ jobs:
           key: ${{ runner.os }}-deno-${{ hashFiles('deno.lock') }}
       
       - name: Build ${{ matrix.target }}
-        run: deno compile --allow-read --allow-write --allow-env --allow-run --allow-sys --target ${{ matrix.target }} --output dist/${{ matrix.artifact }} src/main.ts
+        run: deno compile --allow-read --allow-write --allow-env --allow-sys --allow-run=git,docker,sops,age,age-keygen,shred,rm --target ${{ matrix.target }} --output dist/stackctl src/main.ts
+      
+      - name: Copy README and LICENSE
+        run: cp README.md LICENSE dist/
+      
+      - name: Package tarball
+        working-directory: dist
+        run: tar -czf "stackctl-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" stackctl README.md LICENSE
       
       - name: Generate checksum
-        run: cd dist && sha256sum ${{ matrix.artifact }} > ${{ matrix.artifact }}.sha256
+        working-directory: dist
+        run: shasum -a 256 "stackctl-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" > "stackctl-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256"
       
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}*
+          name: ${{ matrix.target }}
+          path: |
+            dist/stackctl-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            dist/stackctl-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
 
   release:
     name: Create Release
@@ -62,18 +68,22 @@ jobs:
       
       - uses: actions/download-artifact@v4
         with:
-          pattern: stackctl-*
+          pattern: "*"
           path: dist/
           merge-multiple: true
       
       - name: Generate combined checksums
-        run: cat dist/*.sha256 > dist/checksums.txt
-      
+        working-directory: dist
+        run: shasum -a 256 stackctl-*.tar.gz > checksums.txt
+
+      # NOTE: Homebrew tap auto-update is a follow-up task.
+      # The release workflow currently does not trigger a Homebrew tap PR.
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/stackctl-*
+            dist/stackctl-*.tar.gz
             dist/checksums.txt
           generate_release_notes: true
           draft: false

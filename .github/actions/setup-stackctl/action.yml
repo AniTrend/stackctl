@@ -14,7 +14,7 @@ inputs:
       Example: '0.1.0'
     required: false
     default: latest
-  token:
+  github-token:
     description: GitHub token for API requests (defaults to github.token)
     required: false
     default: ${{ github.token }}
@@ -25,33 +25,25 @@ runs:
     - name: Install stackctl
       shell: bash
       env:
-        GH_TOKEN: ${{ inputs.token }}
+        INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
       run: |
         set -euo pipefail
 
         # ------------------------------------------------------------------
-        # Map GitHub Actions runner context to stackctl platform identifiers
+        # Map GitHub Actions runner context to target triples
         # ------------------------------------------------------------------
-        case "$RUNNER_OS" in
-          Linux)  os="linux" ;;
-          macOS)  os="macos" ;;
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64)   target_triple="x86_64-unknown-linux-gnu" ;;
+          Linux-ARM64) target_triple="aarch64-unknown-linux-gnu" ;;
+          macOS-X64)   target_triple="x86_64-apple-darwin" ;;
+          macOS-ARM64) target_triple="aarch64-apple-darwin" ;;
           *)
-            echo "::error::Unsupported runner OS: $RUNNER_OS"
+            echo "::error::Unsupported runner: ${RUNNER_OS} ${RUNNER_ARCH}"
             exit 1
             ;;
         esac
 
-        case "$RUNNER_ARCH" in
-          X64)   arch="x64" ;;
-          ARM64) arch="arm64" ;;
-          *)
-            echo "::error::Unsupported runner architecture: $RUNNER_ARCH"
-            exit 1
-            ;;
-        esac
-
-        target="stackctl-${os}-${arch}"
-        echo "Platform: ${os} ${arch}  →  artifact: ${target}"
+        echo "Platform: ${RUNNER_OS} ${RUNNER_ARCH}  →  target triple: ${target_triple}"
 
         # ------------------------------------------------------------------
         # Resolve version (latest via GitHub API, or explicit tag)
@@ -60,10 +52,24 @@ runs:
 
         if [ "$version_raw" = "latest" ]; then
           echo "Resolving latest release from AniTrend/stackctl..."
-          resolved=$(gh api repos/AniTrend/stackctl/releases/latest --jq '.tag_name') || {
+          resolved=$(curl -sSfL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: token ${INPUT_GITHUB_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/AniTrend/stackctl/releases/latest \
+            | tr -d '\n\r' \
+            | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' \
+            | head -1 \
+            | sed 's/.*"\(.*\)"/\1/') || {
             echo "::error::Failed to resolve latest release"
             exit 1
           }
+
+          if [ -z "$resolved" ]; then
+            echo "::error::Failed to parse tag_name from GitHub API response"
+            exit 1
+          fi
+
           echo "Latest release resolved: ${resolved}"
           tag="$resolved"
         else
@@ -82,24 +88,25 @@ runs:
         # ------------------------------------------------------------------
         # Install directory  (RUNNER_TOOL_CACHE / stackctl / version / arch)
         # ------------------------------------------------------------------
-        install_dir="${RUNNER_TOOL_CACHE}/stackctl/${cache_version}/${arch}"
+        install_dir="${RUNNER_TOOL_CACHE}/stackctl/${cache_version}/${RUNNER_ARCH}"
         mkdir -p "$install_dir"
 
         # ------------------------------------------------------------------
-        # Download binary and checksum from GitHub Releases
+        # Download tarball and checksums.txt from GitHub Releases
         # ------------------------------------------------------------------
+        tarball="stackctl-${tag}-${target_triple}.tar.gz"
         base_url="https://github.com/AniTrend/stackctl/releases/download/${tag}"
-        binary_url="${base_url}/${target}"
-        checksum_url="${base_url}/${target}.sha256"
+        tarball_url="${base_url}/${tarball}"
+        checksum_url="${base_url}/checksums.txt"
 
-        echo "Downloading ${target} (${tag})..."
-        curl -fsSL --retry 3 --retry-delay 1 -o "${install_dir}/${target}" "$binary_url" || {
-          echo "::error::Failed to download ${binary_url}"
+        echo "Downloading ${tarball} (${tag})..."
+        curl -fsSL --retry 3 --retry-delay 1 -o "${install_dir}/${tarball}" "$tarball_url" || {
+          echo "::error::Failed to download ${tarball_url}"
           exit 1
         }
 
-        echo "Downloading checksum..."
-        curl -fsSL --retry 3 --retry-delay 1 -o "${install_dir}/${target}.sha256" "$checksum_url" || {
+        echo "Downloading checksums.txt..."
+        curl -fsSL --retry 3 --retry-delay 1 -o "${install_dir}/checksums.txt" "$checksum_url" || {
           echo "::error::Failed to download ${checksum_url}"
           exit 1
         }
@@ -109,18 +116,47 @@ runs:
         # ------------------------------------------------------------------
         echo "Verifying SHA256 checksum..."
         cd "$install_dir"
-        sha256sum -c "${target}.sha256" > /dev/null 2>&1 || {
-          echo "::error::SHA256 checksum verification failed for ${target}"
-          echo "Expected: $(cat ${target}.sha256)"
-          echo "Got:      $(sha256sum ${target})"
+
+        # Extract expected checksum for this tarball from checksums.txt
+        expected=$(grep -F "${tarball}" checksums.txt | awk '{print $1}')
+        if [ -z "$expected" ]; then
+          echo "::error::Could not find checksum for ${tarball} in checksums.txt"
           exit 1
-        }
+        fi
+
+        # Use sha256sum if available, otherwise fall back to shasum -a 256 (macOS)
+        if command -v sha256sum >/dev/null 2>&1; then
+          actual=$(sha256sum "${tarball}" | awk '{print $1}')
+        else
+          actual=$(shasum -a 256 "${tarball}" | awk '{print $1}')
+        fi
+
+        if [ "$expected" != "$actual" ]; then
+          echo "::error::SHA256 checksum verification failed for ${tarball}"
+          echo "Expected: ${expected}"
+          echo "Got:      ${actual}"
+          exit 1
+        fi
         echo "Checksum OK"
 
         # ------------------------------------------------------------------
-        # Rename to canonical binary name and make executable
+        # Extract tarball
         # ------------------------------------------------------------------
-        mv "$target" stackctl
+        echo "Extracting ${tarball}..."
+        tar -xzf "${tarball}" || {
+          echo "::error::Failed to extract ${tarball}"
+          exit 1
+        }
+
+        # Ensure the stackctl binary exists after extraction
+        if [ ! -f "stackctl" ]; then
+          echo "::error::stackctl binary not found after extracting ${tarball}"
+          exit 1
+        fi
+
+        # ------------------------------------------------------------------
+        # Make binary executable
+        # ------------------------------------------------------------------
         chmod +x stackctl
 
         # ------------------------------------------------------------------
@@ -128,4 +164,4 @@ runs:
         # ------------------------------------------------------------------
         echo "$install_dir" >> "$GITHUB_PATH"
 
-        echo "stackctl ${tag} (${os}-${arch}) installed to ${install_dir}"
+        echo "stackctl ${tag} (${target_triple}) installed to ${install_dir}"

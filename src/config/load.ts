@@ -105,7 +105,7 @@ export async function discoverConfigFiles(
 export async function resolveConfig(
   options?: ResolveOptions,
 ): Promise<ResolvedConfig> {
-  let profile = options?.profile ?? Deno.env.get("STACKCTL_PROFILE");
+  const profile = options?.profile ?? Deno.env.get("STACKCTL_PROFILE");
   const cwd = options?.cwd ?? Deno.cwd();
 
   // Acquire base config (discovery or explicit path)
@@ -135,9 +135,6 @@ export async function resolveConfig(
     }
   } else {
     discovery = await discoverConfigFiles({ cwd, profile });
-    if (!discovery) {
-      throw new Error("No .stackctl config file found. Run `stackctl init` to create one.");
-    }
   }
 
   // Start with defaults
@@ -150,48 +147,6 @@ export async function resolveConfig(
   if (discovery) {
     const baseConfig = await loadConfigFile(discovery.configPath);
     merged = mergeConfig(merged, baseConfig);
-
-    // Determine profile from defaultProfile if not already set
-    if (!profile && merged.defaultProfile) {
-      profile = merged.defaultProfile;
-    }
-
-    // If we now have a profile, discover .stackctl.<profile> in a second pass
-    if (profile && !discovery.profilePath) {
-      const baseDir = dirname(discovery.configPath);
-      const profilePath = join(baseDir, `.stackctl.${profile}`);
-      if (await exists(profilePath)) {
-        discovery.profilePath = profilePath;
-      }
-      const localProfilePath = join(baseDir, `.stackctl.local.${profile}`);
-      if (await exists(localProfilePath)) {
-        discovery.localProfilePath = localProfilePath;
-      }
-    }
-
-    // Check for ambiguity: no profile, multiple .stackctl.* files, no defaultProfile
-    if (!profile) {
-      const baseDir = dirname(discovery.configPath);
-      const profileFiles = await findProfileFiles(baseDir);
-      if (profileFiles.length > 1) {
-        const names = profileFiles.map((f: string) => f.replace(".stackctl.", "")).join(", ");
-        throw new Error(
-          `Ambiguous profile detection: found multiple profile files (${names}). ` +
-            `Either set a defaultProfile in .stackctl or specify --profile <name>.`,
-        );
-      } else if (profileFiles.length === 1) {
-        const detected = profileFiles[0].replace(".stackctl.", "");
-        profile = detected;
-        const profilePath = join(baseDir, `.stackctl.${detected}`);
-        if (await exists(profilePath)) {
-          discovery.profilePath = profilePath;
-        }
-        const localProfilePath = join(baseDir, `.stackctl.local.${detected}`);
-        if (await exists(localProfilePath)) {
-          discovery.localProfilePath = localProfilePath;
-        }
-      }
-    }
 
     // Layer 3: profile
     if (discovery.profilePath) {
@@ -261,28 +216,10 @@ async function walkUpFind(startDir: string, target: string): Promise<string | nu
 }
 
 /** Find repo root by looking for .git upwards, falling back to baseDir. */
-async function findProfileFiles(dir: string): Promise<string[]> {
-  const profileFiles: string[] = [];
-  try {
-    for await (const entry of Deno.readDir(dir)) {
-      if (!entry.isFile) continue;
-      const name = entry.name;
-      if (!name.startsWith(".stackctl.")) continue;
-      if (name === ".stackctl") continue;
-      if (name === ".stackctl.local") continue;
-      if (name.startsWith(".stackctl.local.")) continue;
-      profileFiles.push(name);
-    }
-  } catch {
-    // Directory unreadable, return empty
-  }
-  return profileFiles;
-}
-
-/** Find repo root by looking for .git upwards, falling back to baseDir. */
 async function findRepoRoot(cwd: string, baseDir: string): Promise<string> {
   const gitDir = await walkUpFind(cwd, ".git");
   if (gitDir) {
+    // gitDir is the path to the .git file/dir, repoRoot is its parent
     return dirname(gitDir);
   }
   return baseDir;

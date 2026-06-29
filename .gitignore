@@ -1,0 +1,29 @@
+# stackctl
+.stackctl.local
+.stackctl.local.*
+
+# secrets
+*.env
+!.env.example
+*.env.enc
+age-key.txt
+age.key
+
+# build output
+dist/
+
+# rendered stacks
+.rendered/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# editor
+.vscode/settings.json
+*.swp
+*.swo
+*~
+
+# test coverage
+.coverage/

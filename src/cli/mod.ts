@@ -12,6 +12,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "@std/yaml";
 import { renderStack } from "../render/mod.ts";
 import { RealProcessRunner } from "../process/runner.ts";
 import { sync as syncPipeline } from "../compose/sync.ts";
+import { reloadStacks } from "../compose/reload.ts";
 import {
   dockerInfo,
   dockerServiceLogs,
@@ -691,17 +692,71 @@ export function buildCli(): Command {
     });
 
   // --- reload (issue #9) ---
-  cli.command("reload", "Re-render and redeploy stacks without tearing down.")
-    .option("--force-service-update", "Force update all services after deploy.")
-    .option("--no-force-service-update", "Skip force update (config override).")
-    .option("--no-generate", "Skip stack generation step.")
-    .option("--stacks <names:string>", "Comma-separated list of stack names.")
+  cli.command("reload", "Re-render and redeploy only changed stacks without tearing them down.")
+    .option("--skip-generate", "Only re-render and re-deploy, do not regenerate stacks.")
+    .option("--follow-logs", "Stream logs for deployed stacks after reload.")
+    .option("--stacks <names:string>", "Comma-separated list of stack names to reload.")
     .option("--profile <name:string>", "Use a specific profile.")
-    .option("--override <files:string>", "Comma-separated list of override files.")
-    .option("--dry-run", "Print planned actions without executing.")
-    .action(() => {
-      console.error("reload: not yet implemented (issue #9)");
-      Deno.exit(1);
+    .option("--config <path:string>", "Explicit path to .stackctl config file.")
+    .option("--override <files:string>", "Comma-separated list of override files to apply.")
+    .option("--dry-run", "Compare and report planned actions without executing.")
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const dryRun = options.dryRun as boolean | undefined;
+        const skipGenerate = options.skipGenerate as boolean | undefined;
+        const followLogs = options.followLogs as boolean | undefined;
+        const configPath = options.config as string | undefined;
+
+        const stacks = options.stacks
+          ? (options.stacks as string).split(",").map((s: string) => s.trim())
+          : undefined;
+
+        const overrides = options.override
+          ? (options.override as string).split(",").map((s: string) => s.trim())
+          : undefined;
+
+        const config = await resolveConfig({
+          configPath,
+          profile,
+          cwd: Deno.cwd(),
+        });
+
+        const runner = new RealProcessRunner(dryRun ?? false);
+
+        const results = await reloadStacks({
+          config,
+          runner,
+          stacks,
+          skipGenerate,
+          dryRun,
+          followLogs,
+          profile,
+          overrides,
+        });
+
+        // Report results
+        for (const r of results) {
+          const icon = r.action === "deployed"
+            ? "✓"
+            : r.action === "unchanged"
+            ? "·"
+            : r.action === "would-deploy"
+            ? "[dry-run] would deploy"
+            : r.action === "would-skip"
+            ? "[dry-run] unchanged"
+            : "✗";
+          console.log(`${icon} ${r.stack}`);
+          if (r.error) console.error(`  error: ${r.error}`);
+        }
+
+        if (results.some((r) => r.action === "error")) {
+          Deno.exit(ExitCode.DriftOrValidation);
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
     });
 
   // --- secrets (issue #7) ---

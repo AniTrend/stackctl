@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: stackctl-linux-x64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: stackctl-linux-arm64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            artifact: stackctl-macos-x64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact: stackctl-macos-arm64
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      
+      - name: Cache Deno dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/deno
+            deno.lock
+          key: ${{ runner.os }}-deno-${{ hashFiles('deno.lock') }}
+      
+      - name: Build ${{ matrix.target }}
+        run: deno compile --allow-read --allow-write --allow-env --allow-run --allow-sys --target ${{ matrix.target }} --output dist/${{ matrix.artifact }} src/main.ts
+      
+      - name: Generate checksum
+        run: cd dist && sha256sum ${{ matrix.artifact }} > ${{ matrix.artifact }}.sha256
+      
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}*
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: stackctl-*
+          path: dist/
+          merge-multiple: true
+      
+      - name: Generate combined checksums
+        run: cat dist/*.sha256 > dist/checksums.txt
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/stackctl-*
+            dist/checksums.txt
+          generate_release_notes: true
+          draft: false
+          prerelease: false

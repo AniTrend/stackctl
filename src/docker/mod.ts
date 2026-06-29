@@ -30,6 +30,13 @@ export interface DockerLogsOptions {
   timestamps?: boolean;
 }
 
+export interface DockerServiceUpdateOptions {
+  /** Force update even if no changes are detected. */
+  force?: boolean;
+  /** Image to update to. */
+  image?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Docker CLI command wrappers
 // ---------------------------------------------------------------------------
@@ -127,6 +134,26 @@ export function dockerServiceLogs(
 }
 
 /**
+ * Force a rolling update of a Docker service.
+ *
+ * Equivalent to: `docker service update --force <serviceName>`
+ *
+ * Used by `reload --force-service-update` to force a rolling restart
+ * even when the service definition hasn't changed.
+ */
+export function dockerServiceUpdate(
+  runner: ProcessRunner,
+  serviceName: string,
+  opts?: DockerServiceUpdateOptions,
+): Promise<ProcessResult> {
+  const cmd = ["docker", "service", "update"];
+  if (opts?.force) cmd.push("--force");
+  if (opts?.image) cmd.push("--image", opts.image);
+  cmd.push(serviceName);
+  return runner.run(cmd);
+}
+
+/**
  * Get Docker system information (JSON format).
  *
  * Equivalent to: `docker info --format '{{json .}}'`
@@ -162,4 +189,17 @@ export async function dockerSwarmStatus(
   } catch {
     return { active: false };
   }
+}
+
+/**
+ * Validate a Docker Compose file by running `docker compose config`.
+ *
+ * Equivalent to: `docker compose -f <file> config`
+ * Returns success (true) if the compose file is valid YAML parsable by Docker.
+ */
+export async function dockerComposeConfig(
+  runner: ProcessRunner,
+  composeFile: string,
+): Promise<ProcessResult> {
+  return runner.run(["docker", "compose", "-f", composeFile, "config"]);
 }

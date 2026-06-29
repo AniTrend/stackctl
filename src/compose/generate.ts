@@ -10,6 +10,7 @@ import { ensureDir } from "@std/fs/ensure-dir";
 import { discoverComposeFiles } from "./discover.ts";
 import { loadCompose, loadFragment } from "./load.ts";
 import { composeDeepMerge } from "./merge.ts";
+import { applyOverrides } from "./override.ts";
 import {
   applyLoggingDefaults,
   rewriteBindMountPaths,
@@ -18,6 +19,7 @@ import {
 } from "./transform.ts";
 import { collectAllNamedVolumes } from "./volumes.ts";
 import type { ComposeData, ServiceDef } from "./types.ts";
+import type { OverrideEntry } from "../config/types.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -32,6 +34,8 @@ export interface GenerateOptions {
   outputDir?: string;
   /** Whether this is a dry run (no files written). */
   dryRun?: boolean;
+  /** Optional override files to apply after source composition. */
+  overrides?: (OverrideEntry | string)[];
 }
 
 export interface GenerateResult {
@@ -102,6 +106,7 @@ export async function generateStacks(
         stackName,
         composePaths,
         options.repoRoot,
+        options.overrides,
       );
 
       result.generated[stackName] = output;
@@ -131,6 +136,7 @@ async function generateSingleStack(
   _stackName: string,
   composePaths: string[],
   repoRoot: string,
+  overrides?: (OverrideEntry | string)[],
 ): Promise<string> {
   // 1. Load all compose files + fragments
   const sources = await Promise.all(
@@ -147,6 +153,11 @@ async function generateSingleStack(
   for (const src of sources) {
     const combined = composeDeepMerge(src.data, src.fragment);
     merged = composeDeepMerge(merged, combined);
+  }
+
+  // 2b. Apply override files (Docker Compose override merge semantics)
+  if (overrides?.length) {
+    merged = await applyOverrides(merged, overrides, repoRoot);
   }
 
   // 3. Transform services

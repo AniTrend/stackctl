@@ -368,3 +368,31 @@ This enables drift detection in CI.
 - **Old**: Ctrl-C may leave processes running
 - **New**: SIGINT is forwarded to child processes; `secrets deploy` runs
   cleanup on interruption
+
+## Using stackctl in GitHub Actions
+
+Add the `setup-stackctl` composite action to your workflow to install the
+stackctl binary on any GitHub Actions runner (Linux x64/arm64, macOS x64/arm64):
+
+```yaml
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup stackctl
+        uses: AniTrend/stackctl/.github/actions/setup-stackctl@main
+        with:
+          version: latest  # or a specific version like "0.1.0"
+
+      - name: Verify installation
+        run: stackctl --version
+
+      - name: Run stackctl sync
+        run: stackctl sync
+```
+
+The action downloads the matching binary from GitHub Releases, verifies the
+SHA256 checksum, caches it in the runner tool cache, and adds it to `PATH` for
+all subsequent steps.

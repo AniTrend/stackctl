@@ -1,0 +1,131 @@
+name: Setup stackctl
+description: Install the stackctl binary for use in GitHub Actions workflows
+author: AniTrend
+
+branding:
+  icon: layers
+  color: green
+
+inputs:
+  version:
+    description: >
+      Version of stackctl to install (without the 'v' prefix).
+      Use 'latest' to resolve the latest GitHub Release.
+      Example: '0.1.0'
+    required: false
+    default: latest
+  token:
+    description: GitHub token for API requests (defaults to github.token)
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install stackctl
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        set -euo pipefail
+
+        # ------------------------------------------------------------------
+        # Map GitHub Actions runner context to stackctl platform identifiers
+        # ------------------------------------------------------------------
+        case "$RUNNER_OS" in
+          Linux)  os="linux" ;;
+          macOS)  os="macos" ;;
+          *)
+            echo "::error::Unsupported runner OS: $RUNNER_OS"
+            exit 1
+            ;;
+        esac
+
+        case "$RUNNER_ARCH" in
+          X64)   arch="x64" ;;
+          ARM64) arch="arm64" ;;
+          *)
+            echo "::error::Unsupported runner architecture: $RUNNER_ARCH"
+            exit 1
+            ;;
+        esac
+
+        target="stackctl-${os}-${arch}"
+        echo "Platform: ${os} ${arch}  →  artifact: ${target}"
+
+        # ------------------------------------------------------------------
+        # Resolve version (latest via GitHub API, or explicit tag)
+        # ------------------------------------------------------------------
+        version_raw="${{ inputs.version }}"
+
+        if [ "$version_raw" = "latest" ]; then
+          echo "Resolving latest release from AniTrend/stackctl..."
+          resolved=$(gh api repos/AniTrend/stackctl/releases/latest --jq '.tag_name') || {
+            echo "::error::Failed to resolve latest release"
+            exit 1
+          }
+          echo "Latest release resolved: ${resolved}"
+          tag="$resolved"
+        else
+          # Normalize: if version already starts with 'v', use as-is;
+          # otherwise prepend 'v'
+          if [[ "$version_raw" == v* ]]; then
+            tag="$version_raw"
+          else
+            tag="v${version_raw}"
+          fi
+        fi
+
+        # Derive a clean version string for the cache path (strip leading v)
+        cache_version="${tag#v}"
+
+        # ------------------------------------------------------------------
+        # Install directory  (RUNNER_TOOL_CACHE / stackctl / version / arch)
+        # ------------------------------------------------------------------
+        install_dir="${RUNNER_TOOL_CACHE}/stackctl/${cache_version}/${arch}"
+        mkdir -p "$install_dir"
+
+        # ------------------------------------------------------------------
+        # Download binary and checksum from GitHub Releases
+        # ------------------------------------------------------------------
+        base_url="https://github.com/AniTrend/stackctl/releases/download/${tag}"
+        binary_url="${base_url}/${target}"
+        checksum_url="${base_url}/${target}.sha256"
+
+        echo "Downloading ${target} (${tag})..."
+        curl -fsSL --retry 3 --retry-delay 1 -o "${install_dir}/${target}" "$binary_url" || {
+          echo "::error::Failed to download ${binary_url}"
+          exit 1
+        }
+
+        echo "Downloading checksum..."
+        curl -fsSL --retry 3 --retry-delay 1 -o "${install_dir}/${target}.sha256" "$checksum_url" || {
+          echo "::error::Failed to download ${checksum_url}"
+          exit 1
+        }
+
+        # ------------------------------------------------------------------
+        # Verify SHA256 checksum
+        # ------------------------------------------------------------------
+        echo "Verifying SHA256 checksum..."
+        cd "$install_dir"
+        sha256sum -c "${target}.sha256" > /dev/null 2>&1 || {
+          echo "::error::SHA256 checksum verification failed for ${target}"
+          echo "Expected: $(cat ${target}.sha256)"
+          echo "Got:      $(sha256sum ${target})"
+          exit 1
+        }
+        echo "Checksum OK"
+
+        # ------------------------------------------------------------------
+        # Rename to canonical binary name and make executable
+        # ------------------------------------------------------------------
+        mv "$target" stackctl
+        chmod +x stackctl
+
+        # ------------------------------------------------------------------
+        # Add to PATH for subsequent workflow steps
+        # ------------------------------------------------------------------
+        echo "$install_dir" >> "$GITHUB_PATH"
+
+        echo "stackctl ${tag} (${os}-${arch}) installed to ${install_dir}"

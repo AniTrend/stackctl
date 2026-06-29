@@ -1,50 +1,69 @@
 /**
- * Secrets management: encrypt/decrypt/deploy/clean with SOPS + age.
+ * Secrets management: encrypt/decrypt/clean/deploy .env files with SOPS + age.
+ *
+ * Dotenv encryption model (local-stack compatible):
+ * - Encrypt/decrypt .env files using SOPS with --input-type dotenv --output-type dotenv
+ * - SOPS resolves age keys from its own config (typically .sops.yaml)
+ * - No explicit age key or recipient is passed on operations
+ * - Cleanup uses shred -u with rm -f fallback
  *
  * All external commands go through the ProcessRunner interface.
- * This enables dry-run, test faking, and graceful error handling
- * when sops or age are not installed.
  */
-import { exists } from "@std/fs";
-import { join } from "@std/path";
-import { walk } from "@std/fs/walk";
+import { exists, walk } from "@std/fs";
 import type { ProcessRunner } from "../process/types.ts";
-import type { ResolvedConfig } from "../config/types.ts";
+import { RealProcessRunner } from "../process/runner.ts";
 import type {
   CleanResult,
   DecryptResult,
-  DeployResult,
+  DeployPipelineOptions,
+  DeployPipelineResult,
   EncryptResult,
   ToolingStatus,
 } from "./types.ts";
+import { resolveConfig } from "../config/mod.ts";
+import { discoverComposeFiles } from "../compose/mod.ts";
+import { generateStacks } from "../compose/mod.ts";
+import type { GenerateOptions } from "../compose/mod.ts";
+import { parse as parseYaml, stringify as stringifyYaml } from "@std/yaml";
+import { renderStack } from "../render/mod.ts";
+import { dockerStackDeploy } from "../docker/mod.ts";
+import type { ComposeData } from "../compose/types.ts";
 
 // ---------------------------------------------------------------------------
-// Defaults
-// ---------------------------------------------------------------------------
-
-/** Default encrypted dotenv file name. */
-const DEFAULT_ENCRYPTED_FILE_NAME = ".env.enc";
-
-/** Directories always skipped during secrets discovery. */
-const DEFAULT_SKIP_DIRS = new Set([
-  "node_modules",
-  "stacks",
-  "tools",
-  "environments",
-  "__pycache__",
-  ".git",
-  ".rendered",
-]);
-
-// ---------------------------------------------------------------------------
-// Tooling checks
+// Tooling
 // ---------------------------------------------------------------------------
 
 /**
- * Check whether sops and age are available on PATH.
+ * Check that sops and age are available on PATH.
+ * Throws an Error with a clear message if either tool is missing.
  *
- * Gracefully returns `available: false` for each tool that cannot be found.
- * Attempts to extract version strings via `--version` when available.
+ * This MUST be called before any file mutation operations.
+ */
+export async function ensureTooling(
+  processRunner?: ProcessRunner,
+): Promise<{ sops: boolean; age: boolean }> {
+  const runner = processRunner ?? new RealProcessRunner(false);
+
+  const sops = await runner.which("sops");
+  const age = await runner.which("age");
+
+  if (!sops || !age) {
+    const missing: string[] = [];
+    if (!sops) missing.push("sops");
+    if (!age) missing.push("age");
+    throw new Error(
+      `Missing required secrets tooling: ${missing.join(", ")}. ` +
+        `sops: https://github.com/getsops/sops  age: https://github.com/FiloSottile/age`,
+    );
+  }
+
+  return { sops, age };
+}
+
+/**
+ * Check whether sops and age are available on PATH, with version extraction.
+ *
+ * Non-throwing variant used for status display.
  */
 export async function checkTooling(runner: ProcessRunner): Promise<ToolingStatus> {
   const sopsAvailable = await runner.which("sops");
@@ -83,195 +102,55 @@ async function tryVersion(
 }
 
 // ---------------------------------------------------------------------------
-// Age key resolution
-// ---------------------------------------------------------------------------
-
-/**
- * Resolve the age public key to use for sops encryption.
- *
- * Resolution order:
- *   1. Explicit `explicitKey` parameter (from --age-key CLI flag)
- *   2. `secrets.ageKeyFile` config value (reads file contents as the key)
- *   3. `$SOPS_AGE_KEY` environment variable
- *
- * Returns the resolved key string, or undefined if no key can be found.
- */
-export async function resolveAgeKey(
-  config: ResolvedConfig,
-  explicitKey?: string,
-): Promise<string | undefined> {
-  // 1. Explicit key (passed as CLI argument)
-  if (explicitKey) return explicitKey;
-
-  // 2. Config: secrets.ageKeyFile (read the file for the key)
-  if (config.base.secrets?.ageKeyFile) {
-    const keyPath = config.base.secrets.ageKeyFile;
-    try {
-      if (await exists(keyPath)) {
-        const content = await Deno.readTextFile(keyPath);
-        const trimmed = content.trim();
-        if (trimmed) return trimmed;
-      }
-    } catch {
-      // File may not exist or be readable — fall through to env var
-    }
-  }
-
-  // 3. $SOPS_AGE_KEY environment variable
-  const envKey = Deno.env.get("SOPS_AGE_KEY");
-  if (envKey) return envKey;
-
-  return undefined;
-}
-
-// ---------------------------------------------------------------------------
-// File discovery
-// ---------------------------------------------------------------------------
-
-/**
- * Discover all encrypted files (matching `encryptedFileName` pattern)
- * under the repository root, skipping excluded directories.
- */
-export async function discoverEncryptedFiles(
-  config: ResolvedConfig,
-): Promise<string[]> {
-  const repoRoot = config.base.repoRoot ?? Deno.cwd();
-  const encryptedFileName = config.base.secrets?.encryptedFileName ??
-    DEFAULT_ENCRYPTED_FILE_NAME;
-  const skipDirs = new Set([
-    ...DEFAULT_SKIP_DIRS,
-    ...(config.base.stack.skipDirectories ?? []),
-  ]);
-
-  const files: string[] = [];
-  for await (
-    const entry of walk(repoRoot, {
-      includeDirs: false,
-      includeFiles: true,
-      skip: [/(^|\/)\.(git|rendered)$/],
-    })
-  ) {
-    const name = entry.path.split("/").pop()!;
-    if (name !== encryptedFileName) continue;
-
-    // Skip if any ancestor directory is in the skip set
-    if (hasSkipAncestor(entry.path, repoRoot, skipDirs)) continue;
-
-    files.push(entry.path);
-  }
-
-  return files;
-}
-
-/**
- * Discover all plaintext files that can be encrypted (`.env` files that
- * may or may not have an `.env.enc` counterpart).
- *
- * Only returns files that do NOT already have the `.enc` suffix.
- */
-export async function discoverDecryptedFiles(
-  config: ResolvedConfig,
-): Promise<string[]> {
-  const repoRoot = config.base.repoRoot ?? Deno.cwd();
-  const encryptedFileName = config.base.secrets?.encryptedFileName ??
-    DEFAULT_ENCRYPTED_FILE_NAME;
-  const skipDirs = new Set([
-    ...DEFAULT_SKIP_DIRS,
-    ...(config.base.stack.skipDirectories ?? []),
-  ]);
-
-  // Derive the plaintext counterpart pattern.
-  // If encryptedFileName is ".env.enc", the plaintext counterpart is ".env".
-  const plaintextName = encryptedFileName.replace(/\.enc$/, "");
-
-  const files: string[] = [];
-  for await (
-    const entry of walk(repoRoot, {
-      includeDirs: false,
-      includeFiles: true,
-      skip: [/(^|\/)\.(git|rendered)$/],
-    })
-  ) {
-    const name = entry.path.split("/").pop()!;
-    if (name !== plaintextName) continue;
-
-    // Skip if any ancestor directory is in the skip set
-    if (hasSkipAncestor(entry.path, repoRoot, skipDirs)) continue;
-
-    files.push(entry.path);
-  }
-
-  return files;
-}
-
-// ---------------------------------------------------------------------------
 // Encrypt
 // ---------------------------------------------------------------------------
 
 /**
- * Encrypt a single plaintext file using sops + age.
+ * Encrypt a .env file using SOPS with dotenv format.
  *
- * Writes the encrypted output alongside the original file with `.enc` suffix.
+ * Runs: sops --encrypt --input-type dotenv --output-type dotenv --output <sourcePath>.enc <sourcePath>
  *
- * Options:
- *   - dryRun: log the command that would execute but don't run it
- *   - ageKey: explicit age public key (overrides config/env resolution)
+ * SOPS resolves age keys from its own config (typically .sops.yaml in repo root).
+ * No explicit age key or recipient is passed.
  */
-export async function encryptFile(
-  file: string,
-  config: ResolvedConfig,
-  runner: ProcessRunner,
-  options?: { dryRun?: boolean; ageKey?: string },
+export async function encryptEnvFile(
+  sourcePath: string,
+  processRunner?: ProcessRunner,
 ): Promise<EncryptResult> {
-  const ageKey = await resolveAgeKey(config, options?.ageKey);
-  if (!ageKey) {
+  const runner = processRunner ?? new RealProcessRunner(false);
+  const outputPath = sourcePath + ".enc";
+
+  if (!(await exists(sourcePath))) {
     return {
-      file,
+      file: sourcePath,
+      outputPath,
       success: false,
-      error: "No age key configured. Set secrets.ageKeyFile or $SOPS_AGE_KEY.",
+      error: `File not found: ${sourcePath}`,
     };
   }
 
-  if (options?.dryRun) {
-    console.log(`[dry-run] would encrypt: ${file}`);
-    return { file, success: true };
-  }
-
-  // Determine output path: <file>.enc
-  const outputPath = file + ".enc";
-
-  // Ensure the source file exists
-  if (!(await exists(file))) {
-    return {
-      file,
-      success: false,
-      error: `File not found: ${file}`,
-    };
-  }
-
-  const cmd = [
+  const result = await runner.run([
     "sops",
     "--encrypt",
-    "--input-type=yaml",
-    "--output-type=yaml",
-    "--age",
-    ageKey,
+    "--input-type",
+    "dotenv",
+    "--output-type",
+    "dotenv",
     "--output",
     outputPath,
-    file,
-  ];
-
-  const result = await runner.run(cmd);
+    sourcePath,
+  ]);
 
   if (!result.success) {
     return {
-      file,
+      file: sourcePath,
+      outputPath,
       success: false,
       error: result.stderr || "sops encrypt failed",
     };
   }
 
-  return { file, success: true };
+  return { file: sourcePath, outputPath, success: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -279,216 +158,107 @@ export async function encryptFile(
 // ---------------------------------------------------------------------------
 
 /**
- * Decrypt a single `.env.enc` file using sops + age.
+ * Decrypt an encrypted .env file using SOPS with dotenv format.
  *
- * By default writes the decrypted output alongside the encrypted file
- * (stripping the `.enc` suffix).  Provide `outputDir` to write all
- * decrypted files into a different directory.
+ * Runs: sops --decrypt --input-type dotenv --output-type dotenv --output <plainPath> <sourcePath>
  *
- * Options:
- *   - dryRun: log the command that would execute but don't run it
- *   - outputDir: directory to write decrypted files into
- *   - ageKey: explicit age key
+ * Output path is derived by stripping the `.enc` suffix.
+ * SOPS resolves age keys from its own config.
+ * No explicit age key or recipient is passed.
  */
-export async function decryptFile(
-  file: string,
-  config: ResolvedConfig,
-  runner: ProcessRunner,
-  options?: { dryRun?: boolean; outputDir?: string; ageKey?: string },
+export async function decryptEnvFile(
+  sourcePath: string,
+  processRunner?: ProcessRunner,
 ): Promise<DecryptResult> {
-  const ageKey = await resolveAgeKey(config, options?.ageKey);
+  const runner = processRunner ?? new RealProcessRunner(false);
+  const warnings: string[] = [];
 
-  if (options?.dryRun) {
-    const outputPath = determineDecryptOutput(file, options?.outputDir);
-    console.log(`[dry-run] would decrypt: ${file} -> ${outputPath}`);
-    return { file, outputPath, success: true };
-  }
+  // Derive plaintext output path by stripping .enc suffix
+  const outputPath = sourcePath.replace(/\.enc$/, "");
 
-  // Ensure the source file exists
-  if (!(await exists(file))) {
+  if (!(await exists(sourcePath))) {
     return {
-      file,
-      outputPath: "",
+      file: sourcePath,
+      outputPath,
       success: false,
-      error: `File not found: ${file}`,
+      error: `File not found: ${sourcePath}`,
+      warnings,
     };
   }
 
-  const outputPath = determineDecryptOutput(file, options?.outputDir);
-
-  const cmd = [
+  const result = await runner.run([
     "sops",
     "--decrypt",
-    "--input-type=yaml",
-    "--output-type=yaml",
+    "--input-type",
+    "dotenv",
+    "--output-type",
+    "dotenv",
     "--output",
     outputPath,
-  ];
-
-  // Add age key if resolved
-  if (ageKey) {
-    cmd.push("--age", ageKey);
-  }
-
-  cmd.push(file);
-
-  const result = await runner.run(cmd);
+    sourcePath,
+  ]);
 
   if (!result.success) {
     return {
-      file,
+      file: sourcePath,
       outputPath,
       success: false,
       error: result.stderr || "sops decrypt failed",
+      warnings,
     };
   }
 
-  return { file, outputPath, success: true };
-}
+  warnings.push(
+    `Decrypted ${sourcePath} -> ${outputPath}. Remember to clean up decrypted files after deployment.`,
+  );
 
-/** Determine the output path for a decrypted file. */
-function determineDecryptOutput(
-  encryptedFile: string,
-  outputDir?: string,
-): string {
-  const baseName = encryptedFile.split("/").pop()!;
-  // Strip .enc suffix: ".env.enc" -> ".env"
-  const plainName = baseName.replace(/\.enc$/, "");
-
-  if (outputDir) {
-    return join(outputDir, plainName);
-  }
-
-  const parentDir = encryptedFile.substring(0, encryptedFile.lastIndexOf("/"));
-  return join(parentDir, plainName);
+  return { file: sourcePath, outputPath, success: true, warnings };
 }
 
 // ---------------------------------------------------------------------------
-// Deploy
+// File discovery
 // ---------------------------------------------------------------------------
 
 /**
- * Decrypt secrets for a given stack and create Docker secrets from them.
+ * Discover all `.env.enc` files under the given directory.
  *
- * Workflow:
- *   1. Discover or use provided encrypted files for the stack
- *   2. Decrypt each file to a temp location
- *   3. For each decrypted file, create a Docker secret with the file name as secret name
- *   4. Clean up temp decrypted files
- *
- * Options:
- *   - dryRun: show what would be deployed without executing
- *   - encryptedFiles: explicit list of encrypted files (bypasses discovery)
+ * Skips node_modules, .git, and .rendered directories.
  */
-export async function deploySecrets(
-  stack: string,
-  config: ResolvedConfig,
-  runner: ProcessRunner,
-  options?: { dryRun?: boolean; encryptedFiles?: string[]; ageKey?: string },
-): Promise<DeployResult> {
-  const ageKey = await resolveAgeKey(config, options?.ageKey);
-  if (!ageKey && !options?.dryRun) {
-    return {
-      stack,
-      secrets: [],
-      success: false,
-      error: "No age key configured. Set secrets.ageKeyFile or $SOPS_AGE_KEY.",
-    };
-  }
-
-  // Discover encrypted files for this stack
-  const encFiles = options?.encryptedFiles ??
-    await discoverEncryptedFiles(config);
-
-  if (encFiles.length === 0) {
-    if (options?.dryRun) {
-      console.log(`[dry-run] no encrypted files found for stack: ${stack}`);
-      return { stack, secrets: [], success: true };
-    }
-    return { stack, secrets: [], success: true };
-  }
-
-  if (options?.dryRun) {
-    console.log(
-      `[dry-run] would deploy ${encFiles.length} secrets for stack: ${stack}`,
-    );
-    for (const f of encFiles) {
-      console.log(
-        `[dry-run]   docker secret create ${secretNameFromPath(f)} <decrypted ${f}>`,
-      );
-    }
-    return { stack, secrets: encFiles, success: true };
-  }
-
-  // Decrypt each file to a temp directory
-  const tmpDir = await Deno.makeTempDir({ prefix: "stackctl-secrets-" });
-  const deployedSecrets: string[] = [];
-  const errors: string[] = [];
-
-  try {
-    for (const encFile of encFiles) {
-      const decryptResult = await decryptFile(encFile, config, runner, {
-        outputDir: tmpDir,
-        ageKey,
-      });
-
-      if (!decryptResult.success) {
-        errors.push(`Failed to decrypt ${encFile}: ${decryptResult.error}`);
-        continue;
-      }
-
-      const secretName = secretNameFromPath(encFile);
-
-      // Create Docker secret
-      const createResult = await runner.run([
-        "docker",
-        "secret",
-        "create",
-        secretName,
-        decryptResult.outputPath,
-      ]);
-
-      if (createResult.success) {
-        deployedSecrets.push(secretName);
-      } else {
-        errors.push(
-          `Failed to create secret '${secretName}': ${createResult.stderr || "unknown error"}`,
-        );
-      }
-    }
-  } finally {
-    // Clean up temp directory
-    try {
-      await Deno.remove(tmpDir, { recursive: true });
-    } catch {
-      // Best-effort cleanup
+export async function findEncryptedEnvFiles(cwd: string): Promise<string[]> {
+  const files: string[] = [];
+  for await (
+    const entry of walk(cwd, {
+      includeDirs: false,
+      includeFiles: true,
+      skip: [/(^|\/)\.(git|rendered)$/, /node_modules/],
+    })
+  ) {
+    if (entry.name === ".env.enc") {
+      files.push(entry.path);
     }
   }
-
-  if (errors.length > 0) {
-    return {
-      stack,
-      secrets: deployedSecrets,
-      success: false,
-      error: errors.join("; "),
-    };
-  }
-
-  return { stack, secrets: deployedSecrets, success: true };
+  return files;
 }
 
 /**
- * Derive a Docker secret name from the encrypted file path.
- * Strips `.env.enc` suffix and converts to a valid Docker secret name.
+ * Discover all `.env.example` files under the given directory.
+ *
+ * Skips node_modules, .git, and .rendered directories.
  */
-function secretNameFromPath(filePath: string): string {
-  const baseName = filePath.split("/").pop() ?? filePath;
-  return baseName
-    .replace(/\.env\.enc$/, "")
-    .replace(/\.enc$/, "")
-    .replace(/[^a-zA-Z0-9_-]/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .toLowerCase();
+export async function findEnvExampleFiles(cwd: string): Promise<string[]> {
+  const files: string[] = [];
+  for await (
+    const entry of walk(cwd, {
+      includeDirs: false,
+      includeFiles: true,
+      skip: [/(^|\/)\.(git|rendered)$/, /node_modules/],
+    })
+  ) {
+    if (entry.name === ".env.example") {
+      files.push(entry.path);
+    }
+  }
+  return files;
 }
 
 // ---------------------------------------------------------------------------
@@ -496,70 +266,51 @@ function secretNameFromPath(filePath: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Remove temporary and stray decrypted files from a secrets directory.
+ * Remove decrypted .env files securely.
  *
- * Removes files matching these patterns:
- *   - `*.tmp` files
- *   - Plaintext `.env` files that have an encrypted `.env.enc` counterpart
- *     (stray decrypted files left from interrupted operations)
+ * Uses `shred -u <path>` for secure deletion, with `rm -f <path>` as fallback.
  *
- * Options:
- *   - dryRun: show what would be cleaned without removing
+ * In dry-run mode, returns the paths that would be cleaned without removing them.
  */
-export async function cleanTempFiles(
-  secretsDir: string,
-  _runner: ProcessRunner,
-  options?: { dryRun?: boolean },
+export async function cleanDecryptedEnvFiles(
+  envFiles: string[],
+  dryRun?: boolean,
+  processRunner?: ProcessRunner,
 ): Promise<CleanResult> {
+  const runner = processRunner ?? new RealProcessRunner(dryRun ?? false);
   const removedFiles: string[] = [];
 
-  if (!(await exists(secretsDir))) {
-    return { removedFiles };
+  if (dryRun) {
+    return { removedFiles: [...envFiles] };
   }
 
-  // Walk secretsDir looking for cleanable files
-  const encryptedFileName = ".env.enc";
+  for (const file of envFiles) {
+    let removed = false;
 
-  for await (
-    const entry of walk(secretsDir, {
-      includeDirs: false,
-      includeFiles: true,
-    })
-  ) {
-    const name = entry.path.split("/").pop()!;
-    let shouldRemove = false;
-
-    // .tmp files
-    if (name.endsWith(".tmp")) {
-      shouldRemove = true;
+    // Try shred -u first
+    try {
+      const shredResult = await runner.run(["shred", "-u", file]);
+      if (shredResult.success) {
+        removed = true;
+      }
+    } catch {
+      // shred failed or not available — fall through to rm
     }
 
-    // Stray plaintext .env files: if .env exists and .env.enc exists alongside
-    if (name === ".env") {
-      const parentDir = entry.path.substring(0, entry.path.lastIndexOf("/"));
-      const encPath = join(parentDir, encryptedFileName);
-      if (await exists(encPath)) {
-        shouldRemove = true;
+    // Fallback to rm -f
+    if (!removed) {
+      try {
+        const rmResult = await runner.run(["rm", "-f", file]);
+        if (rmResult.success) {
+          removed = true;
+        }
+      } catch {
+        // Both shred and rm failed — best-effort
       }
     }
 
-    if (shouldRemove) {
-      removedFiles.push(entry.path);
-    }
-  }
-
-  if (options?.dryRun) {
-    for (const f of removedFiles) {
-      console.log(`[dry-run] would remove: ${f}`);
-    }
-    return { removedFiles };
-  }
-
-  for (const f of removedFiles) {
-    try {
-      await Deno.remove(f);
-    } catch {
-      // Best-effort — some files may be locked or already deleted
+    if (removed) {
+      removedFiles.push(file);
     }
   }
 
@@ -567,27 +318,257 @@ export async function cleanTempFiles(
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers
+// Deploy Pipeline
 // ---------------------------------------------------------------------------
 
 /**
- * Check if any ancestor directory of `filePath` (relative to `repoRoot`)
- * is in the skip set.
+ * Full deploy pipeline: decrypt .env.enc -> generate -> render -> deploy -> cleanup.
+ *
+ * Steps:
+ *   a. Find all `.env.enc` files
+ *   b. Decrypt them to their `.env` locations
+ *   c. Determine which stacks are affected (from service dirs)
+ *   d. Generate, render, and deploy those stacks
+ *   e. Clean up decrypted `.env` files
+ *
+ * In dry-run mode, every step is printed without any mutation.
  */
-function hasSkipAncestor(
-  filePath: string,
-  repoRoot: string,
-  skipDirs: Set<string>,
-): boolean {
-  // Get the relative path from repoRoot to the parent dir of the file
-  const parentDir = filePath.substring(0, filePath.lastIndexOf("/"));
-  const relDir = parentDir.startsWith(repoRoot)
-    ? parentDir.substring(repoRoot.length).replace(/^\//, "")
-    : parentDir;
+export async function deployPipeline(
+  options: DeployPipelineOptions,
+): Promise<DeployPipelineResult> {
+  const result: DeployPipelineResult = { warnings: [], errors: [] };
+  const runner = options.processRunner ?? new RealProcessRunner(options.dryRun ?? false);
+  const dryRun = options.dryRun ?? false;
 
-  const parts = relDir.split("/").filter(Boolean);
-  for (const part of parts) {
-    if (skipDirs.has(part)) return true;
+  // ------------------------------------------------------------------
+  // a. Find all encrypted .env files
+  // ------------------------------------------------------------------
+  const envEncFiles = await findEncryptedEnvFiles(options.cwd);
+
+  if (envEncFiles.length === 0) {
+    result.warnings.push("No .env.enc files found. Nothing to decrypt.");
+    return result;
   }
-  return false;
+
+  if (dryRun) {
+    result.warnings.push(`[dry-run] Would decrypt ${envEncFiles.length} .env.enc file(s):`);
+    for (const f of envEncFiles) {
+      result.warnings.push(`[dry-run]   ${f}`);
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // b. Decrypt all encrypted files
+  // ------------------------------------------------------------------
+  const decryptedFiles: string[] = [];
+
+  for (const encFile of envEncFiles) {
+    if (dryRun) {
+      const plainPath = encFile.replace(/\.enc$/, "");
+      result.warnings.push(`[dry-run]   -> ${plainPath}`);
+      decryptedFiles.push(plainPath);
+    } else {
+      const decryptResult = await decryptEnvFile(encFile, runner);
+      if (decryptResult.success) {
+        decryptedFiles.push(decryptResult.outputPath);
+        for (const w of decryptResult.warnings) result.warnings.push(w);
+      } else {
+        result.errors.push(
+          `Failed to decrypt ${encFile}: ${decryptResult.error}`,
+        );
+      }
+    }
+  }
+
+  if (result.errors.length > 0) {
+    return result;
+  }
+
+  // ------------------------------------------------------------------
+  // c. Determine affected stacks
+  // ------------------------------------------------------------------
+  // A stack is affected if any of its service directories contains
+  // a decrypted .env file. We extract service names from the paths
+  // of the encrypted files and match against discovered stacks.
+
+  const affectedServiceNames = new Set<string>();
+  for (const encFile of envEncFiles) {
+    // Normalize: extract the immediate parent directory as the service name
+    const relPath = encFile.startsWith(options.cwd)
+      ? encFile.slice(options.cwd.length).replace(/^\//, "")
+      : encFile;
+
+    // Example: services/web/.env.enc -> parts = ["services", "web", ".env.enc"]
+    const parts = relPath.split("/").filter(Boolean);
+    if (parts.length >= 2) {
+      // The parent directory of .env.enc is the service name
+      affectedServiceNames.add(parts[parts.length - 2]);
+    }
+  }
+
+  const affectedStacks = options.stacks ??
+    [...affectedServiceNames];
+
+  if (affectedStacks.length === 0) {
+    result.warnings.push("Could not determine affected stacks from encrypted file locations.");
+    // Clean up before returning
+    if (!dryRun && decryptedFiles.length > 0) {
+      await cleanDecryptedEnvFiles(decryptedFiles, false, runner);
+    }
+    return result;
+  }
+
+  // Resolve config for the sync pipeline
+  let config;
+  try {
+    config = await resolveConfig({ profile: options.profile, cwd: options.cwd });
+  } catch (err: unknown) {
+    result.errors.push(
+      `Config resolution failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    // Clean up before returning
+    if (!dryRun && decryptedFiles.length > 0) {
+      await cleanDecryptedEnvFiles(decryptedFiles, false, runner);
+    }
+    return result;
+  }
+
+  const repoRoot = config.base.repoRoot ?? options.cwd;
+
+  // ------------------------------------------------------------------
+  // d. Generate -> Render -> Deploy each affected stack
+  // ------------------------------------------------------------------
+  try {
+    // Discover stacks
+    const discovery = await discoverComposeFiles({ repoRoot });
+    const targetStacks = affectedStacks.filter((s) => Object.keys(discovery.stacks).includes(s));
+
+    if (targetStacks.length === 0) {
+      result.warnings.push(
+        `None of the affected stacks ${
+          [...affectedStacks].join(", ")
+        } were discovered in the repo.`,
+      );
+      // Clean up before returning
+      if (!dryRun && decryptedFiles.length > 0) {
+        await cleanDecryptedEnvFiles(decryptedFiles, false, runner);
+      }
+      return result;
+    }
+
+    if (dryRun) {
+      result.warnings.push(
+        `[dry-run] Would generate, render, and deploy stacks: ${targetStacks.join(", ")}`,
+      );
+    }
+
+    // Generate stacks (in memory)
+    const genOptions: GenerateOptions = {
+      stacks: targetStacks,
+      repoRoot,
+      outputDir: undefined,
+      dryRun: true, // in-memory only
+    };
+
+    const genResult = await generateStacks(genOptions);
+
+    for (const w of genResult.warnings) result.warnings.push(w);
+    for (const e of genResult.errors) result.errors.push(e);
+
+    if (genResult.errors.length > 0) {
+      // Clean up before returning
+      if (!dryRun && decryptedFiles.length > 0) {
+        await cleanDecryptedEnvFiles(decryptedFiles, false, runner);
+      }
+      return result;
+    }
+
+    // Render and deploy each stack
+    for (const [stackName, yamlContent] of Object.entries(genResult.generated)) {
+      if (dryRun) {
+        result.warnings.push(`[dry-run] Would deploy stack: ${stackName}`);
+        continue;
+      }
+
+      try {
+        // Parse generated YAML
+        const parsed = parseYaml(yamlContent) as ComposeData;
+
+        // Render — resolve ${VAR} placeholders
+        const renderResult = await renderStack({
+          data: parsed,
+          projectDir: repoRoot,
+          repoRoot,
+          strict: true,
+        });
+
+        for (const w of renderResult.warnings) {
+          result.warnings.push(`[${stackName}] ${w}`);
+        }
+
+        // Deploy
+        const tempFile = await Deno.makeTempFile({ suffix: ".yml" });
+        try {
+          const yaml = stringifyYaml(renderResult.data, {
+            indent: 2,
+            lineWidth: 120,
+            noRefs: true,
+          } as Record<string, unknown>);
+          await Deno.writeTextFile(tempFile, yaml);
+
+          const deployResult = await dockerStackDeploy(
+            runner,
+            stackName,
+            tempFile,
+            {
+              prune: false,
+              detach: false,
+              resolveImage: "always",
+            },
+          );
+
+          if (deployResult.success) {
+            result.warnings.push(`Deployed stack: ${stackName}`);
+          } else {
+            result.errors.push(
+              `Stack "${stackName}" deployment failed: ${deployResult.stderr || "unknown error"}`,
+            );
+          }
+        } finally {
+          // Clean up temp compose file
+          try {
+            await Deno.remove(tempFile);
+          } catch {
+            // Ignore cleanup errors
+          }
+        }
+      } catch (err: unknown) {
+        result.errors.push(
+          `Stack "${stackName}": ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  } catch (err: unknown) {
+    result.errors.push(
+      `Pipeline error: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // ------------------------------------------------------------------
+  // e. Clean up decrypted .env files
+  // ------------------------------------------------------------------
+  if (!dryRun && decryptedFiles.length > 0) {
+    const cleanResult = await cleanDecryptedEnvFiles(decryptedFiles, false, runner);
+    if (cleanResult.removedFiles.length > 0) {
+      result.warnings.push(
+        `Cleaned up ${cleanResult.removedFiles.length} decrypted .env file(s).`,
+      );
+    }
+  } else if (dryRun) {
+    result.warnings.push(
+      `[dry-run] Would clean up ${decryptedFiles.length} decrypted .env file(s).`,
+    );
+  }
+
+  return result;
 }

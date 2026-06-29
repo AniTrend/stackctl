@@ -1,17 +1,24 @@
 /**
  * Secrets management module — public API surface.
  *
- * Provides encrypt/decrypt/deploy/clean functions for SOPS + age
- * encrypted dotenv files.
+ * Provides encrypt/decrypt/clean pipeline functions for SOPS + age
+ * encrypted dotenv files (local-stack compatible).
  */
-export * from "./types.ts";
+export type {
+  CleanResult,
+  DecryptResult,
+  DeployPipelineOptions,
+  DeployPipelineResult,
+  EncryptResult,
+  ToolingStatus,
+} from "./types.ts";
 export {
   checkTooling,
-  cleanTempFiles,
-  decryptFile,
-  deploySecrets,
-  discoverDecryptedFiles,
-  discoverEncryptedFiles,
-  encryptFile,
-  resolveAgeKey,
+  cleanDecryptedEnvFiles,
+  decryptEnvFile,
+  deployPipeline,
+  encryptEnvFile,
+  ensureTooling,
+  findEncryptedEnvFiles,
+  findEnvExampleFiles,
 } from "./mod.ts";

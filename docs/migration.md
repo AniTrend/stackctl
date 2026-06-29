@@ -1,31 +1,43 @@
 # Migration Guide: `stackctl.sh` to `stackctl`
 
-This guide documents the migration from the repository-local `./stackctl.sh` script
-to the standalone `stackctl` binary. It covers configuration migration, command
-mapping, behavior differences, and rollback instructions.
+> **DRAFT -- In Progress**
+>
+> This document tracks the migration from `stackctl.sh` to the standalone `stackctl`
+> binary. The CLI contracts, release workflow, and GitHub Actions integration are
+> still evolving. Sections marked with ⚠️ may change before the first stable
+> release.
+
+This guide documents the migration from the repository-local `./stackctl.sh` script to the
+standalone `stackctl` binary. It covers configuration migration, command mapping, behavior
+differences, and rollback instructions.
 
 ## Overview
 
-`AniTrend/local-stack` historically shipped a `tools/stackctl.sh` script plus
-Python-based generation and rendering tools (`generate_stacks.py`,
-`render_compose.py`). The `stackctl` binary replaces this entire toolchain with a
-single Deno-compiled binary, eliminating the Python and script dependencies.
+`AniTrend/local-stack` historically shipped a `tools/stackctl.sh` script plus Python-based
+generation and rendering tools (`generate_stacks.py`, `render_compose.py`). The `stackctl` binary
+replaces this entire toolchain with a single Deno-compiled binary, eliminating the Python and script
+dependencies.
 
-| Before | After |
-|--------|-------|
-| `./stackctl.sh up` | `stackctl up` |
-| Python 3 + dependencies | Single binary, no runtime |
-| Per-repo local script | System-wide install (Homebrew) |
-| Shell-based config via env vars | `~/.stackctl` YAML config |
-| Manual profile switching | Built-in profile overlays |
+| Before                          | After                          |
+| ------------------------------- | ------------------------------ |
+| `./stackctl.sh up`              | `stackctl up`                  |
+| Python 3 + dependencies         | Single binary, no runtime      |
+| Per-repo local script           | System-wide install (Homebrew) |
+| Shell-based config via env vars | `~/.stackctl` YAML config      |
+| Manual profile switching        | Built-in profile overlays      |
 
 ## Prerequisites
 
 - **Docker** with Swarm mode enabled (same as before)
 - **stackctl binary** — installed via one of:
   - Homebrew: `brew install AniTrend/tap/stackctl`
-  - GitHub Releases: download from latest release
-  - Manual: `deno install -n stackctl --allow-read --allow-write --allow-env --allow-run --allow-sys jsr:@anitrend/stackctl`
+  - **GitHub Releases**: download the appropriate tarball
+    (`stackctl-v<version>-<target-triple>.tar.gz`) from the
+    [latest release](https://github.com/AniTrend/stackctl/releases). Supported
+    triples: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+    `x86_64-apple-darwin`, `aarch64-apple-darwin`.
+  - Manual:
+    `deno install -n stackctl --allow-read --allow-write --allow-env --allow-run --allow-sys jsr:@anitrend/stackctl`
 - **SOPS + age** (optional) — only needed for `stackctl secrets` commands
 
 ## Quick Start
@@ -84,31 +96,41 @@ render:
 
 ### Converting Environment Variables
 
-| Old Environment Variable | New Config Field | Example |
-|-------------------------|------------------|---------|
-| `COMPOSE_DIR` | `stack.directory` | `./docker-compose` |
-| `RENDER_DIR` | `render.outputDirectory` | `./.rendered` |
-| `STACKS_DIR` | No equivalent (generated to `stacks/`) | — |
-| `STACK_PREFIX` | `project` | `mystack` |
-| `STACKCTL_PROFILE` | `--profile` flag or `STACKCTL_PROFILE` env | `dev` |
+| Old Environment Variable | New Config Field                           | Example            |
+| ------------------------ | ------------------------------------------ | ------------------ |
+| `COMPOSE_DIR`            | `stack.directory`                          | `./docker-compose` |
+| `RENDER_DIR`             | `render.outputDirectory`                   | `./.rendered`      |
+| `STACKS_DIR`             | No equivalent (generated to `stacks/`)     | —                  |
+| `STACK_PREFIX`           | `project`                                  | `mystack`          |
+| `STACKCTL_PROFILE`       | `--profile` flag or `STACKCTL_PROFILE` env | `dev`              |
 
-## Command Mapping
+## Command Parity
 
-| Old (`./stackctl.sh`) | New (`stackctl`) | Notes |
-|----------------------|-------------------|-------|
-| `./stackctl.sh up` | `stackctl up` | Replaces shell-based deploy |
-| `./stackctl.sh down` | `stackctl down` | — |
-| `./stackctl.sh status` | `stackctl status` | Now with `--json` output |
-| `./stackctl.sh logs` | `stackctl logs` | Improved streaming |
+These commands have reached functional parity with the old `stackctl.sh` script:
+
+| Old (`./stackctl.sh`)  | New (`stackctl`)  | Notes                     |
+| ---------------------- | ----------------- | ------------------------- |
+| `./stackctl.sh up`     | `stackctl up`     | Replaces shell-based deploy |
+| `./stackctl.sh down`   | `stackctl down`   | —                         |
+| `./stackctl.sh status` | `stackctl status` | Now with `--json` output  |
+| `./stackctl.sh logs`   | `stackctl logs`   | Improved streaming        |
 | `./stackctl.sh reload` | `stackctl reload` | Full config-aware pipeline |
 | `./stackctl.sh doctor` | `stackctl doctor` | More comprehensive checks |
-| No equivalent | `stackctl generate` | Explicit stack regeneration |
-| No equivalent | `stackctl render` | Explicit environment interpolation |
-| No equivalent | `stackctl secrets` | SOPS/age integration |
-| No equivalent | `stackctl env` | `.env` scaffolding |
-| No equivalent | `stackctl plan` | Inspect operations without executing |
-| No equivalent | `stackctl init` | Config file generation |
-| No equivalent | `stackctl sync` | Full pipeline (generate → render → deploy) |
+
+### New Capabilities (No `stackctl.sh` Equivalent)
+
+The standalone binary adds capabilities that were previously handled by separate
+Python scripts or not available at all:
+
+| Command             | Purpose                                    |
+| ------------------- | ------------------------------------------ |
+| `stackctl generate` | Explicit stack regeneration                |
+| `stackctl render`   | Explicit environment interpolation         |
+| `stackctl secrets`  | SOPS/age integration                       |
+| `stackctl env`      | `.env` scaffolding                         |
+| `stackctl plan`     | Inspect operations without executing       |
+| `stackctl init`     | Config file generation                     |
+| `stackctl sync`     | Full pipeline (generate → render → deploy) |
 
 ## Step-by-Step Migration
 
@@ -133,8 +155,8 @@ stackctl init
 stackctl init --project myproject --preset standard
 ```
 
-This creates `.stackctl` in your project root. Edit it to match your
-recorded configuration from Step 1.
+This creates `.stackctl` in your project root. Edit it to match your recorded configuration from
+Step 1.
 
 ### Step 3: Verify Configuration
 
@@ -210,8 +232,8 @@ Profile overlays are loaded in this order (later wins):
 
 ## Override File Support
 
-`stackctl` supports explicit override files in addition to profile overlays.
-Override files use Docker Compose override semantics:
+`stackctl` supports explicit override files in addition to profile overlays. Override files use
+Docker Compose override semantics:
 
 - **Scalars**: replaced
 - **Maps**: deep-merged
@@ -221,7 +243,7 @@ Override files use Docker Compose override semantics:
 stackctl up --override ./overrides/production.yml --override ./overrides/region-eu.yml
 ```
 
-Override files are applied *after* profile merging but *before* render.
+Override files are applied _after_ profile merging but _before_ render.
 
 ## Rollback
 
@@ -249,15 +271,15 @@ mv stackctl.previous /usr/local/bin/stackctl
 
 ### Revert to stackctl.sh
 
-The old `stackctl.sh` remains in your repository and is unaffected by
-`stackctl` installation. To revert:
+The old `stackctl.sh` remains in your repository and is unaffected by `stackctl` installation. To
+revert:
 
 1. Uninstall `stackctl`: `brew uninstall stackctl`
 2. Delete `.stackctl` config: `rm .stackctl`
 3. Continue using `./stackctl.sh` as before
 
-Generated files (`stacks/*.yml`, `.rendered/*.yml`) are compatible between
-both tools for the same configuration.
+Generated files (`stacks/*.yml`, `.rendered/*.yml`) are compatible between both tools for the same
+configuration.
 
 ## Troubleshooting
 
@@ -268,6 +290,7 @@ both tools for the same configuration.
 ```
 
 Ensure Docker is running and your user has access:
+
 ```bash
 docker info
 ```
@@ -279,6 +302,7 @@ docker info
 ```
 
 Initialize Swarm mode:
+
 ```bash
 docker swarm init
 ```
@@ -289,8 +313,8 @@ docker swarm init
 ✗ Stack "myapp" not found in /path/to/project
 ```
 
-Check that compose files have the `x-stack` label and are in the configured
-`stack.directory`:
+Check that compose files have the `x-stack` label and are in the configured `stack.directory`:
+
 ```yaml
 # docker-compose.yml
 services:
@@ -302,19 +326,18 @@ x-stack:
 
 ### Config Validation Errors
 
-`stackctl` validates configuration at startup. Run `stackctl doctor` for a
-complete diagnostic. Common issues:
+`stackctl` validates configuration at startup. Run `stackctl doctor` for a complete diagnostic.
+Common issues:
 
 - **Missing `project`**: Set the project name in `.stackctl`
 - **Missing `stack.network`**: Set the Docker network name
-- **Empty `stack.names`**: Leave as `[]` to discover all stacks, or list
-  specific stack names
+- **Empty `stack.names`**: Leave as `[]` to discover all stacks, or list specific stack names
 - **Invalid `render.outputDirectory`**: Must be a valid path
 
 ### Unresolved Environment Variables
 
-In strict mode (`render.strict: true`), unused variables cause failure.
-Switch to non-strict mode or provide the variables:
+In strict mode (`render.strict: true`), unused variables cause failure. Switch to non-strict mode or
+provide the variables:
 
 ```bash
 # Non-strict mode
@@ -328,6 +351,7 @@ stackctl up
 ### Permission Issues
 
 `stackctl` requires these permissions:
+
 - `--allow-read` — read compose files, config, env files
 - `--allow-write` — write generated/rendered stacks
 - `--allow-env` — read environment variables
@@ -343,8 +367,15 @@ When installed via Homebrew, permissions are pre-configured.
 - **Old**: Relative paths in generated stacks reference the repo root
 - **New**: Paths are absolutized to the project root during rendering
 
-This means `.rendered/*.yml` files are self-contained and can be used
-independently of the working directory.
+This means `.rendered/*.yml` files are self-contained and can be used independently of the working
+directory.
+
+> ⚠️ **Generated files are not safe to deploy raw.** Stack files in `stacks/`
+> (generated) and `.rendered/` (rendered) contain `${VAR}` placeholders that
+> must be resolved through the render pipeline before deployment. Deploying a
+> generated stack file directly without running `stackctl render` or
+> `stackctl sync` will result in unresolved environment variables in your
+> running services.
 
 ### Deterministic Output
 
@@ -360,19 +391,21 @@ This enables drift detection in CI.
 
 - **Old**: First error stops the pipeline
 - **New**: All errors are collected and reported at once
-- Exit codes: 0=success, 1=validation/drift failure, 2=config error,
-  3=missing dependency, 4=unexpected error
+- Exit codes: 0=success, 1=validation/drift failure, 2=config error, 3=missing dependency,
+  4=unexpected error
 
 ### Signal Handling
 
 - **Old**: Ctrl-C may leave processes running
-- **New**: SIGINT is forwarded to child processes; `secrets deploy` runs
-  cleanup on interruption
+- **New**: SIGINT is forwarded to child processes; `secrets deploy` runs cleanup on interruption
 
 ## Using stackctl in GitHub Actions
 
-Add the `setup-stackctl` composite action to your workflow to install the
-stackctl binary on any GitHub Actions runner (Linux x64/arm64, macOS x64/arm64):
+> ⚠️ The GitHub Actions integration is under active development and its location
+> may change before the first stable release.
+
+Add the `setup-stackctl` composite action to your workflow to install the stackctl binary on any
+GitHub Actions runner (Linux x64/arm64, macOS x64/arm64):
 
 ```yaml
 jobs:
@@ -382,9 +415,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup stackctl
-        uses: AniTrend/stackctl/.github/actions/setup-stackctl@main
+        uses: AniTrend/stackctl/.github/actions/setup-stackctl@v1
         with:
-          version: latest  # or a specific version like "0.1.0"
+          version: latest # or a specific version like "0.1.0"
 
       - name: Verify installation
         run: stackctl --version
@@ -393,6 +426,7 @@ jobs:
         run: stackctl sync
 ```
 
-The action downloads the matching binary from GitHub Releases, verifies the
-SHA256 checksum, caches it in the runner tool cache, and adds it to `PATH` for
+The action selects the correct tarball
+(`stackctl-v<version>-<target-triple>.tar.gz`) for the runner's OS and
+architecture, verifies the SHA256 checksum, and adds the binary to `PATH` for
 all subsequent steps.

@@ -23,6 +23,7 @@ export interface StackctlConfig {
   secrets?: SecretsConfig;
   /** Command-specific defaults. */
   commands?: CommandsConfig;
+  overrides?: OverridesConfig;
 }
 
 export interface StackConfig {
@@ -80,6 +81,11 @@ export interface ReloadConfig {
   autoGenerate?: boolean;
   /** Force service update after deploy (default: false). */
   forceServiceUpdate?: boolean;
+}
+
+export interface OverridesConfig {
+  autoDiscoverProfiles?: boolean;
+  exclude?: string[];
 }
 
 /** A resolved profile configuration — partial config that overlays base config. */

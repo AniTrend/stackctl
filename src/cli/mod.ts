@@ -1,5 +1,12 @@
 import { Command } from "@cliffy/command";
 import { VERSION } from "../version.ts";
+import { initConfig } from "../config/mod.ts";
+import { resolveConfig } from "../config/mod.ts";
+import { ExitCode } from "../config/types.ts";
+import { generateStacks } from "../compose/mod.ts";
+import type { GenerateOptions } from "../compose/mod.ts";
+import { join } from "@std/path";
+import { exists } from "@std/fs";
 
 /**
  * Parse and execute CLI commands.
@@ -29,7 +36,8 @@ export function buildCli(): Command {
         "Manage Docker Swarm stacks with generation, rendering, secrets, and lifecycle commands.",
     )
     .help({ hints: true })
-    .option("--debug", "Enable debug output and stack traces.", { hidden: false });
+    .option("--debug", "Enable debug output and stack traces.", { hidden: false })
+    .option("--config <path:string>", "Path to .stackctl config file.", { hidden: false });
 
   // Default action: show help when no subcommand matches
   cli.action(() => {
@@ -45,9 +53,45 @@ export function buildCli(): Command {
     .option("--write-gitignore", "Append .stackctl.local and .env to .gitignore.")
     .option("--force", "Overwrite existing .stackctl file.")
     .option("--dry-run", "Print the config that would be written without writing.")
-    .action(() => {
-      console.error("init: not yet implemented (issue #3)");
-      Deno.exit(1);
+    .action(async (options: Record<string, unknown>) => {
+      const detect = options.detect as boolean | undefined;
+      const preset = options.preset as string | undefined;
+      const profile = options.profile as string | undefined;
+      const writeGitignore = options.writeGitignore as boolean | undefined;
+      const force = options.force as boolean | undefined;
+      const dryRun = options.dryRun as boolean | undefined;
+
+      const result = await initConfig({
+        detect,
+        preset,
+        profile,
+        force,
+        dryRun,
+        cwd: Deno.cwd(),
+      });
+
+      for (const err of result.errors) {
+        console.error(`error: ${err}`);
+      }
+
+      if (result.errors.length > 0) {
+        Deno.exit(2); // ExitCode.UserConfigError
+      }
+
+      if (dryRun) {
+        for (const file of result.written) {
+          console.log(`would write: ${file}`);
+        }
+      } else {
+        for (const file of result.written) {
+          console.log(`wrote: ${file}`);
+        }
+      }
+
+      // Handle --write-gitignore
+      if (writeGitignore) {
+        await appendGitignore(Deno.cwd());
+      }
     });
 
   // --- generate (issue #4) ---
@@ -56,9 +100,54 @@ export function buildCli(): Command {
     .option("--stacks <names:string>", "Comma-separated list of stack names to generate.")
     .option("--output-dir <path:string>", "Write generated stacks to a specific directory.")
     .option("--profile <name:string>", "Use a specific profile.")
-    .action(() => {
-      console.error("generate: not yet implemented (issue #4)");
-      Deno.exit(1);
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const dryRun = options.dryRun as boolean | undefined;
+
+        const config = await resolveConfig({ profile, cwd: Deno.cwd() });
+        const repoRoot = config.base.repoRoot ?? Deno.cwd();
+
+        const genOptions: GenerateOptions = {
+          stacks: options.stacks
+            ? (options.stacks as string).split(",").map((s: string) => s.trim())
+            : undefined,
+          configStackNames: config.base.stack.names,
+          repoRoot,
+          outputDir: options.outputDir as string | undefined,
+          dryRun,
+          network: config.base.stack.network,
+        };
+
+        const result = await generateStacks(genOptions);
+
+        // Print warnings
+        for (const w of result.warnings) {
+          console.error(`warning: ${w}`);
+        }
+
+        // Print errors
+        if (result.errors.length > 0) {
+          for (const e of result.errors) {
+            console.error(`error: ${e}`);
+          }
+          Deno.exit(ExitCode.DriftOrValidation);
+        }
+
+        if (dryRun) {
+          for (const [name, content] of Object.entries(result.generated)) {
+            console.log(`# --- stack: ${name} ---`);
+            console.log(content);
+          }
+        } else {
+          for (const f of result.files) {
+            console.log(`wrote: ${f}`);
+          }
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
     });
 
   // --- render (issue #5) ---
@@ -246,4 +335,36 @@ export function buildCli(): Command {
     });
 
   return cli as unknown as Command;
+}
+
+/**
+ * Append stackctl-specific entries to .gitignore.
+ */
+async function appendGitignore(cwd: string): Promise<void> {
+  const gitignorePath = join(cwd, ".gitignore");
+  const entries = [
+    "# stackctl generated files",
+    ".stackctl.local",
+    ".stackctl.local.*",
+    ".env",
+    ".env.*",
+    "!.env.example",
+  ];
+
+  let existing = "";
+  if (await exists(gitignorePath)) {
+    existing = await Deno.readTextFile(gitignorePath);
+    if (!existing.endsWith("\n")) existing += "\n";
+  }
+
+  // Check which entries are already present
+  const newEntries = entries.filter((e) => !existing.includes(e));
+  if (newEntries.length === 0) {
+    console.log(".gitignore already up to date");
+    return;
+  }
+
+  const toAppend = (existing ? "\n" : "") + newEntries.join("\n") + "\n";
+  await Deno.writeTextFile(gitignorePath, existing + toAppend);
+  console.log(`updated: ${gitignorePath}`);
 }

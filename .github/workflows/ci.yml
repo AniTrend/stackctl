@@ -1,0 +1,65 @@
+# CI workflow for stackctl.
+# Runs on every push and PR to main/dev branches.
+# Validates format, linting, type checking, tests, and coverage.
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+env:
+  DENO_VERSION: "2.x"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ env.DENO_VERSION }}
+
+      - name: Cache dependencies
+        run: deno task cache
+
+      - name: Check formatting
+        run: deno task fmt:check
+
+      - name: Lint
+        run: deno task lint
+
+      - name: Type check
+        run: deno task check
+
+      - name: Run tests with coverage
+        run: deno task test --coverage=.coverage
+
+      - name: Generate coverage report
+        if: success()
+        run: deno task coverage
+
+  build:
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ env.DENO_VERSION }}
+
+      - name: Build Linux x64
+        run: deno task build:linux:x64
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stackctl-linux-x64
+          path: dist/stackctl-linux-x64

@@ -34,6 +34,7 @@ export function buildCli(): Command {
   // Default action: show help when no subcommand matches
   cli.action(() => {
     cli.showHelp();
+    Deno.exit(0);
   });
 
   // --- init (issue #3) ---
@@ -45,7 +46,8 @@ export function buildCli(): Command {
     .option("--force", "Overwrite existing .stackctl file.")
     .option("--dry-run", "Print the config that would be written without writing.")
     .action(() => {
-      throw new Error("init: not yet implemented (issue #3)");
+      console.error("init: not yet implemented (issue #3)");
+      Deno.exit(1);
     });
 
   // --- generate (issue #4) ---
@@ -55,7 +57,8 @@ export function buildCli(): Command {
     .option("--output-dir <path:string>", "Write generated stacks to a specific directory.")
     .option("--profile <name:string>", "Use a specific profile.")
     .action(() => {
-      throw new Error("generate: not yet implemented (issue #4)");
+      console.error("generate: not yet implemented (issue #4)");
+      Deno.exit(1);
     });
 
   // --- render (issue #5) ---
@@ -72,7 +75,8 @@ export function buildCli(): Command {
       "Comma-separated list of override files to apply before rendering.",
     )
     .action(() => {
-      throw new Error("render: not yet implemented (issue #5)");
+      console.error("render: not yet implemented (issue #5)");
+      Deno.exit(1);
     });
 
   // --- up (issue #6) ---
@@ -85,7 +89,8 @@ export function buildCli(): Command {
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--override <files:string>", "Comma-separated list of override files.")
     .action(() => {
-      throw new Error("up: not yet implemented (issue #6)");
+      console.error("up: not yet implemented (issue #6)");
+      Deno.exit(1);
     });
 
   // --- down (issue #6) ---
@@ -96,7 +101,8 @@ export function buildCli(): Command {
     .option("--stacks <names:string>", "Comma-separated list of stack names to remove.")
     .option("--profile <name:string>", "Use a specific profile.")
     .action(() => {
-      throw new Error("down: not yet implemented (issue #6)");
+      console.error("down: not yet implemented (issue #6)");
+      Deno.exit(1);
     });
 
   // --- status (issue #6) ---
@@ -105,7 +111,8 @@ export function buildCli(): Command {
     .option("--stacks <names:string>", "Comma-separated list of stack names.")
     .option("--profile <name:string>", "Use a specific profile.")
     .action(() => {
-      throw new Error("status: not yet implemented (issue #6)");
+      console.error("status: not yet implemented (issue #6)");
+      Deno.exit(1);
     });
 
   // --- logs (issue #6) ---
@@ -114,7 +121,8 @@ export function buildCli(): Command {
     .option("--stacks <names:string>", "Comma-separated list of stack names.")
     .option("--profile <name:string>", "Use a specific profile.")
     .action(() => {
-      throw new Error("logs: not yet implemented (issue #6)");
+      console.error("logs: not yet implemented (issue #6)");
+      Deno.exit(1);
     });
 
   // --- sync (issue #6) ---
@@ -123,7 +131,8 @@ export function buildCli(): Command {
     .option("--non-interactive", "Skip confirmation; exit 1 on drift.")
     .option("--profile <name:string>", "Use a specific profile.")
     .action(() => {
-      throw new Error("sync: not yet implemented (issue #6)");
+      console.error("sync: not yet implemented (issue #6)");
+      Deno.exit(1);
     });
 
   // --- doctor (issue #6) ---
@@ -132,7 +141,8 @@ export function buildCli(): Command {
     .option("--check-secrets", "Also check for secrets tooling (sops, age).")
     .option("--profile <name:string>", "Use a specific profile.")
     .action(() => {
-      throw new Error("doctor: not yet implemented (issue #6)");
+      console.error("doctor: not yet implemented (issue #6)");
+      Deno.exit(1);
     });
 
   // --- reload (issue #9) ---
@@ -145,7 +155,8 @@ export function buildCli(): Command {
     .option("--override <files:string>", "Comma-separated list of override files.")
     .option("--dry-run", "Print planned actions without executing.")
     .action(() => {
-      throw new Error("reload: not yet implemented (issue #9)");
+      console.error("reload: not yet implemented (issue #9)");
+      Deno.exit(1);
     });
 
   // --- secrets (issue #7) ---
@@ -155,32 +166,37 @@ export function buildCli(): Command {
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--dry-run", "Print planned actions without executing.")
     .action(() => {
-      throw new Error("secrets encrypt: not yet implemented (issue #7)");
+      console.error("secrets encrypt: not yet implemented (issue #7)");
+      Deno.exit(1);
     });
   secretsCmd.command("decrypt", "Decrypt encrypted .env files to plaintext.")
     .arguments("[services...:string]")
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--dry-run", "Print planned actions without executing.")
     .action(() => {
-      throw new Error("secrets decrypt: not yet implemented (issue #7)");
+      console.error("secrets decrypt: not yet implemented (issue #7)");
+      Deno.exit(1);
     });
   secretsCmd.command("deploy", "Decrypt and deploy stacks with secret values.")
     .arguments("[services...:string]")
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--dry-run", "Print planned actions without executing.")
     .action(() => {
-      throw new Error("secrets deploy: not yet implemented (issue #7)");
+      console.error("secrets deploy: not yet implemented (issue #7)");
+      Deno.exit(1);
     });
   secretsCmd.command("clean", "Remove plaintext .env files that have encrypted counterparts.")
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--dry-run", "Print planned actions without executing.")
     .action(() => {
-      throw new Error("secrets clean: not yet implemented (issue #7)");
+      console.error("secrets clean: not yet implemented (issue #7)");
+      Deno.exit(1);
     });
   secretsCmd.command("check", "Check secrets tooling availability.")
     .option("--profile <name:string>", "Use a specific profile.")
     .action(() => {
-      throw new Error("secrets check: not yet implemented (issue #7)");
+      console.error("secrets check: not yet implemented (issue #7)");
+      Deno.exit(1);
     });
 
   // --- env (issue #14) ---
@@ -195,7 +211,8 @@ export function buildCli(): Command {
     .option("--from-profile <name:string>", "Materialize env from a profile preset.")
     .option("--materialize", "Materialize profile preset env values.")
     .action(() => {
-      throw new Error("env: not yet implemented (issue #14)");
+      console.error("env: not yet implemented (issue #14)");
+      Deno.exit(1);
     });
 
   // --- plan (issue #15) ---
@@ -206,22 +223,26 @@ export function buildCli(): Command {
     .option("--override <files:string>", "Comma-separated list of override files.")
     .option("--json", "Output machine-readable JSON.")
     .action(() => {
-      throw new Error("plan: not yet implemented (issue #15)");
+      console.error("plan: not yet implemented (issue #15)");
+      Deno.exit(1);
     });
 
   // --- completions (issue #10) ---
   const completionsCmd = cli.command("completions", "Generate shell completion scripts.");
   completionsCmd.command("bash", "Generate bash completion script.")
     .action(() => {
-      throw new Error("completions bash: not yet implemented (issue #10)");
+      console.error("completions bash: not yet implemented (issue #10)");
+      Deno.exit(1);
     });
   completionsCmd.command("zsh", "Generate zsh completion script.")
     .action(() => {
-      throw new Error("completions zsh: not yet implemented (issue #10)");
+      console.error("completions zsh: not yet implemented (issue #10)");
+      Deno.exit(1);
     });
   completionsCmd.command("fish", "Generate fish completion script.")
     .action(() => {
-      throw new Error("completions fish: not yet implemented (issue #10)");
+      console.error("completions fish: not yet implemented (issue #10)");
+      Deno.exit(1);
     });
 
   return cli as unknown as Command;

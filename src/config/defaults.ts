@@ -23,8 +23,4 @@ export const DEFAULT_CONFIG: StackctlConfig = {
     activeName: ".env",
     allowPlaintextProfiles: false,
   },
-  overrides: {
-    autoDiscoverProfiles: true,
-    exclude: [],
-  },
 };

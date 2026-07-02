@@ -4,9 +4,11 @@ import { initConfig } from "../config/mod.ts";
 import { resolveConfig } from "../config/mod.ts";
 import { ExitCode } from "../config/types.ts";
 import { generateStacks } from "../compose/mod.ts";
-import type { GenerateOptions } from "../compose/mod.ts";
-import { join } from "@std/path";
-import { exists } from "@std/fs";
+import type { ComposeData, GenerateOptions } from "../compose/mod.ts";
+import { join, resolve } from "@std/path";
+import { ensureDir, exists } from "@std/fs";
+import { parse as parseYaml, stringify as stringifyYaml } from "@std/yaml";
+import { renderStack } from "../render/mod.ts";
 
 /**
  * Parse and execute CLI commands.
@@ -65,6 +67,7 @@ export function buildCli(): Command {
         detect,
         preset,
         profile,
+        writeGitignore,
         force,
         dryRun,
         cwd: Deno.cwd(),
@@ -100,6 +103,10 @@ export function buildCli(): Command {
     .option("--stacks <names:string>", "Comma-separated list of stack names to generate.")
     .option("--output-dir <path:string>", "Write generated stacks to a specific directory.")
     .option("--profile <name:string>", "Use a specific profile.")
+    .option(
+      "--override <files:string>",
+      "Comma-separated list of override files to apply.",
+    )
     .action(async (options: Record<string, unknown>) => {
       try {
         const profile = options.profile as string | undefined;
@@ -108,15 +115,19 @@ export function buildCli(): Command {
         const config = await resolveConfig({ profile, cwd: Deno.cwd() });
         const repoRoot = config.base.repoRoot ?? Deno.cwd();
 
+        // Parse override file paths
+        const overrideFiles = options.override
+          ? (options.override as string).split(",").map((s: string) => s.trim()).filter(Boolean)
+          : undefined;
+
         const genOptions: GenerateOptions = {
           stacks: options.stacks
             ? (options.stacks as string).split(",").map((s: string) => s.trim())
             : undefined,
-          configStackNames: config.base.stack.names,
           repoRoot,
           outputDir: options.outputDir as string | undefined,
           dryRun,
-          network: config.base.stack.network,
+          overrides: overrideFiles,
         };
 
         const result = await generateStacks(genOptions);
@@ -163,9 +174,91 @@ export function buildCli(): Command {
       "--override <files:string>",
       "Comma-separated list of override files to apply before rendering.",
     )
-    .action(() => {
-      console.error("render: not yet implemented (issue #5)");
-      Deno.exit(1);
+    .option("--dry-run", "Print rendered output without writing files.")
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const strict = options.strict as boolean | undefined;
+        const dryRun = options.dryRun as boolean | undefined;
+        const outputDir = options.outputDir as string | undefined;
+
+        const config = await resolveConfig({ profile, cwd: Deno.cwd() });
+        const repoRoot = config.base.repoRoot ?? Deno.cwd();
+        const renderOutputDir = outputDir || config.base.render.outputDirectory;
+
+        // 1. Generate stacks (in memory)
+        const genResult = await generateStacks({
+          stacks: options.stacks
+            ? (options.stacks as string).split(",").map((s: string) => s.trim())
+            : undefined,
+          repoRoot,
+          outputDir: undefined, // generate in memory only
+          dryRun: true, // generate in memory for render
+          overrides: options.override
+            ? (options.override as string).split(",").map((s: string) => s.trim())
+            : undefined,
+        });
+
+        if (genResult.errors.length > 0) {
+          for (const e of genResult.errors) console.error(`error: ${e}`);
+          Deno.exit(ExitCode.DriftOrValidation);
+        }
+
+        // 2. Render each generated stack
+        const allWarnings: string[] = [];
+        const results: Record<string, string> = {};
+        let hasUnresolved = false;
+
+        for (const [stackName, yamlContent] of Object.entries(genResult.generated)) {
+          const parsed = parseYaml(yamlContent) as ComposeData;
+          const projectDir = repoRoot; // generated stacks live at repo root
+
+          const result = await renderStack({
+            data: parsed,
+            projectDir,
+            repoRoot,
+            strict,
+          });
+
+          allWarnings.push(...result.warnings);
+          if (result.hasUnresolved) hasUnresolved = true;
+
+          results[stackName] = `# Rendered by stackctl render — do not edit manually.\n${
+            stringifyYaml(result.data, {
+              indent: 2,
+              lineWidth: 120,
+            } as Record<string, unknown>)
+          }`;
+        }
+
+        // 3. Print warnings
+        for (const w of allWarnings) {
+          console.error(`warning: ${w}`);
+        }
+
+        // 4. Output
+        if (dryRun) {
+          for (const [name, content] of Object.entries(results)) {
+            console.log(`# --- rendered: ${name} ---`);
+            console.log(content);
+          }
+        } else {
+          const outDir = resolve(repoRoot, renderOutputDir);
+          await ensureDir(outDir);
+          for (const [name, content] of Object.entries(results)) {
+            const outPath = join(outDir, `${name}.rendered.yml`);
+            await Deno.writeTextFile(outPath, content);
+            console.log(`wrote: ${outPath}`);
+          }
+        }
+
+        if (strict && hasUnresolved) {
+          Deno.exit(ExitCode.DriftOrValidation);
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
     });
 
   // --- up (issue #6) ---

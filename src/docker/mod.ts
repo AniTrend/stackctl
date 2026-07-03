@@ -18,6 +18,23 @@ export interface DockerLogsOptions {
   timestamps?: boolean;
 }
 
+export interface DockerServiceUpdateOptions {
+  force?: boolean;
+  image?: string;
+}
+
+export function dockerServiceUpdate(
+  runner: ProcessRunner,
+  serviceName: string,
+  opts?: DockerServiceUpdateOptions,
+): Promise<ProcessResult> {
+  const cmd = ["docker", "service", "update"];
+  if (opts?.force) cmd.push("--force");
+  if (opts?.image) cmd.push("--image", opts.image);
+  cmd.push(serviceName);
+  return runner.run(cmd);
+}
+
 export function dockerStackDeploy(
   runner: ProcessRunner,
   stackName: string,

@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      
+      - name: Cache Deno dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/deno
+            deno.lock
+          key: ${{ runner.os }}-deno-${{ hashFiles('deno.lock') }}
+      
+      - name: Build ${{ matrix.target }}
+        run: deno compile --allow-read --allow-write --allow-env --allow-sys --allow-run=git,docker,sops,age,age-keygen,shred,rm --target ${{ matrix.target }} --output dist/stackctl src/main.ts
+      
+      - name: Copy README and LICENSE
+        run: cp README.md LICENSE dist/
+      
+      - name: Package tarball
+        working-directory: dist
+        run: tar -czf "stackctl-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" stackctl README.md LICENSE
+      
+      - name: Generate checksum
+        working-directory: dist
+        run: shasum -a 256 "stackctl-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" > "stackctl-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256"
+      
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/stackctl-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            dist/stackctl-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "*"
+          path: dist/
+          merge-multiple: true
+      
+      - name: Generate combined checksums
+        working-directory: dist
+        run: shasum -a 256 stackctl-*.tar.gz > checksums.txt
+
+      # NOTE: Homebrew tap auto-update is a follow-up task.
+      # The release workflow currently does not trigger a Homebrew tap PR.
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/stackctl-*.tar.gz
+            dist/checksums.txt
+          generate_release_notes: true
+          draft: false
+          prerelease: false

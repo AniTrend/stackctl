@@ -6,7 +6,7 @@ import { ExitCode } from "../config/types.ts";
 import { generateStacks } from "../compose/mod.ts";
 import { discoverComposeFiles } from "../compose/discover.ts";
 import type { ComposeData, GenerateOptions } from "../compose/mod.ts";
-import { join, resolve } from "@std/path";
+import { basename, dirname, join, resolve } from "@std/path";
 import { ensureDir, exists } from "@std/fs";
 import { parse as parseYaml, stringify as stringifyYaml } from "@std/yaml";
 import { renderStack } from "../render/mod.ts";
@@ -22,6 +22,15 @@ import {
   dockerStackServices,
   dockerSwarmStatus,
 } from "../docker/mod.ts";
+import {
+  batchCreateEnvs,
+  diffEnvFiles,
+  discoverEnvExamples,
+  envDoctor,
+  getEnvStatusList,
+  materializeEnvFromProfile,
+} from "../env/mod.ts";
+import type { EnvDiff } from "../env/types.ts";
 
 let exitCode = 0;
 
@@ -872,19 +881,309 @@ export function buildCli(): Command {
     });
 
   // --- env (issue #14) ---
-  cli.command("env", "Manage .env files and profile env presets.")
-    .option("--list", "List discovered services and .env status.")
-    .option("--recreate", "Create missing .env files from .env.example.")
+  const envCmd = cli.command(
+    "env",
+    "Manage .env files and profile env presets.",
+  );
+
+  // env list
+  envCmd.command("list", "List discovered .env.example files and their status.")
+    .option("--profile <name:string>", "Use a specific profile for variant lookup.")
+    .option("--paths <paths:string>", "Comma-separated list of service paths to limit listing.")
+    .option("--json", "Output machine-readable JSON.")
+    .option("--list", "Extended status listing (example, env, encrypted, profile variants).")
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const jsonOutput = options.json as boolean | undefined;
+        const extendedList = options.list as boolean | undefined;
+        const pathsOpt = options.paths as string | undefined;
+        const paths = pathsOpt
+          ? pathsOpt.split(",").map((s: string) => s.trim()).filter(Boolean)
+          : undefined;
+        const cwd = Deno.cwd();
+
+        if (extendedList) {
+          const statusList = await getEnvStatusList(cwd, { profile, paths });
+          if (jsonOutput) {
+            console.log(JSON.stringify(statusList, null, 2));
+          } else {
+            if (statusList.length === 0) {
+              console.log("No .env files or examples found.");
+              return;
+            }
+            console.log(
+              `${"Service".padEnd(28)} ${"Example".padEnd(8)} ${"Env".padEnd(8)} ${
+                "Enc".padEnd(8)
+              } ${"Profile".padEnd(12)} Path`,
+            );
+            console.log(
+              `${"-".repeat(28)} ${"-".repeat(8)} ${"-".repeat(8)} ${"-".repeat(8)} ${
+                "-".repeat(12)
+              } ${"-".repeat(40)}`,
+            );
+            for (const entry of statusList) {
+              const exIcon = entry.hasExample ? "\u2713" : "\u2717";
+              const envIcon = entry.hasEnv ? "\u2713" : "\u2717";
+              const encIcon = entry.hasEncrypted ? "\u2713" : "\u2717";
+              const profLabel = entry.profile ?? "(default)";
+              const pathLabel = entry.envPath ?? entry.examplePath ?? "";
+              console.log(
+                `${entry.serviceName.padEnd(28)} ${exIcon.padEnd(8)} ${envIcon.padEnd(8)} ${
+                  encIcon.padEnd(8)
+                } ${profLabel.padEnd(12)} ${pathLabel}`,
+              );
+            }
+          }
+        } else {
+          const examples = await discoverEnvExamples(cwd, { profile, paths });
+          if (jsonOutput) {
+            console.log(JSON.stringify(examples, null, 2));
+          } else {
+            if (examples.length === 0) {
+              console.log("No .env.example files found.");
+              return;
+            }
+            console.log(`${"Service".padEnd(30)} ${"Status".padEnd(12)} Path`);
+            console.log(`${"-".repeat(30)} ${"-".repeat(12)} ${"-".repeat(40)}`);
+            for (const ex of examples) {
+              const icon = ex.status === "present"
+                ? "\u2713"
+                : ex.status === "outdated"
+                ? "~"
+                : "\u2717";
+              console.log(
+                `${ex.serviceName.padEnd(30)} ${(icon + " " + ex.status).padEnd(12)} ${ex.envPath}`,
+              );
+            }
+          }
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        exitCode = ExitCode.UnexpectedError;
+      }
+    });
+
+  // env create
+  envCmd.command("create", "Create .env files from .env.example templates.")
+    .arguments("[name:string]")
+    .option("--profile <name:string>", "Use a specific profile for variant lookup.")
+    .option("--paths <paths:string>", "Comma-separated list of service paths to limit creation.")
     .option("--force", "Overwrite existing .env files.")
-    .option("--yes", "Skip confirmation.")
     .option("--dry-run", "Print planned changes without writing.")
-    .option("--paths <paths:string>", "Comma-separated list of service paths.")
-    .option("--profile <name:string>", "Use a specific profile.")
-    .option("--from-profile <name:string>", "Materialize env from a profile preset.")
-    .option("--materialize", "Materialize profile preset env values.")
-    .action(() => {
-      console.error("env: not yet implemented (issue #14)");
-      exitCode = 1;
+    .option("--json", "Output machine-readable JSON.")
+    .action(async (options: Record<string, unknown>, name?: string) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const force = options.force as boolean | undefined;
+        const dryRun = options.dryRun as boolean | undefined;
+        const jsonOutput = options.json as boolean | undefined;
+        const pathsOpt = options.paths as string | undefined;
+        const paths = pathsOpt
+          ? pathsOpt.split(",").map((s: string) => s.trim()).filter(Boolean)
+          : undefined;
+        const cwd = Deno.cwd();
+
+        const result = await batchCreateEnvs(cwd, {
+          profile,
+          force,
+          dryRun,
+          serviceName: name,
+          paths,
+        });
+
+        if (jsonOutput) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          if (dryRun) {
+            for (const c of result.created) console.log(`[dry-run] would create: ${c.path}`);
+            for (const s of result.skipped) {
+              console.log(`[dry-run] would skip: ${s.path} (${s.reason})`);
+            }
+          } else {
+            for (const c of result.created) console.log(`created: ${c.path}`);
+            for (const s of result.skipped) console.log(`skipped: ${s.path} (${s.reason})`);
+          }
+          for (const e of result.errors) console.error(`error: ${e.path}: ${e.message}`);
+        }
+        if (result.errors.length > 0) exitCode = ExitCode.DriftOrValidation;
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        exitCode = ExitCode.UnexpectedError;
+      }
+    });
+
+  // env diff
+  envCmd.command("diff", "Show differences between .env.example and .env files.")
+    .arguments("[name:string]")
+    .option("--profile <name:string>", "Use a specific profile for variant lookup.")
+    .option("--paths <paths:string>", "Comma-separated list of service paths to limit diff.")
+    .option("--json", "Output machine-readable JSON.")
+    .action(async (options: Record<string, unknown>, name?: string) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const jsonOutput = options.json as boolean | undefined;
+        const pathsOpt = options.paths as string | undefined;
+        const paths = pathsOpt
+          ? pathsOpt.split(",").map((s: string) => s.trim()).filter(Boolean)
+          : undefined;
+        const cwd = Deno.cwd();
+
+        const examples = await discoverEnvExamples(cwd, { profile, paths });
+        const filtered = name
+          ? examples.filter((e) =>
+            e.serviceName === name || basename(dirname(e.examplePath)) === name
+          )
+          : examples;
+
+        if (filtered.length === 0) {
+          console.log(
+            jsonOutput ? "[]" : `No .env.example files found${name ? ` matching "${name}"` : ""}.`,
+          );
+          return;
+        }
+
+        const diffs: EnvDiff[] = [];
+        for (const ex of filtered) {
+          diffs.push(await diffEnvFiles(ex.examplePath, ex.envPath, ex.serviceName));
+        }
+
+        if (jsonOutput) {
+          console.log(JSON.stringify(diffs, null, 2));
+        } else {
+          for (const diff of diffs) {
+            console.log(`\n=== ${diff.serviceName} ===`);
+            if (diff.onlyInExample.length > 0) {
+              console.log("  Missing from .env:");
+              for (const k of diff.onlyInExample) console.log(`    - ${k}`);
+            }
+            if (diff.onlyInEnv.length > 0) {
+              console.log("  Only in .env (not in example):");
+              for (const k of diff.onlyInEnv) console.log(`    + ${k}`);
+            }
+            if (diff.common.length > 0) console.log(`  Common (${diff.common.length} keys)`);
+            if (diff.onlyInExample.length === 0 && diff.onlyInEnv.length === 0) {
+              console.log("  (no differences)");
+            }
+          }
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        exitCode = ExitCode.UnexpectedError;
+      }
+    });
+
+  // env materialize
+  envCmd.command("materialize", "Materialize profile preset env values into .env files.")
+    .option(
+      "--from-profile <name:string>",
+      "Profile from which to source values (required).",
+      { required: true },
+    )
+    .option(
+      "--paths <paths:string>",
+      "Comma-separated list of service paths to limit materialization.",
+    )
+    .option("--force", "Overwrite existing .env files.")
+    .option("--dry-run", "Print planned changes without writing.")
+    .option("--json", "Output machine-readable JSON.")
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const fromProfile = options.fromProfile as string;
+        const force = options.force as boolean | undefined;
+        const dryRun = options.dryRun as boolean | undefined;
+        const jsonOutput = options.json as boolean | undefined;
+        const pathsOpt = options.paths as string | undefined;
+        const paths = pathsOpt
+          ? pathsOpt.split(",").map((s: string) => s.trim()).filter(Boolean)
+          : undefined;
+        const cwd = Deno.cwd();
+
+        if (!fromProfile) {
+          console.error("error: --from-profile is required");
+          exitCode = ExitCode.UserConfigError;
+          return;
+        }
+
+        const result = await materializeEnvFromProfile(cwd, {
+          profile: fromProfile,
+          force,
+          dryRun,
+          paths,
+        });
+
+        if (jsonOutput) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          const prefix = dryRun ? "[dry-run] would materialize" : "materialized";
+          for (const m of result.materialized) {
+            console.log(`${prefix}: ${m.sourcePath} -> ${m.targetPath}`);
+          }
+          for (const s of result.skipped) {
+            console.log(`skipped: ${s.sourcePath} -> ${s.targetPath} (${s.reason})`);
+          }
+          for (const e of result.errors) {
+            console.error(`error: ${e.serviceName}: ${e.message}`);
+          }
+        }
+
+        if (result.errors.length > 0) exitCode = ExitCode.DriftOrValidation;
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        exitCode = ExitCode.UnexpectedError;
+      }
+    });
+
+  // env audit
+  envCmd.command("audit", "Check .env files for sensitive plaintext issues.")
+    .option("--paths <paths:string>", "Comma-separated list of service paths to limit check.")
+    .option("--dry-run", "Report what would be checked without logging as errors.")
+    .option("--json", "Output machine-readable JSON.")
+    .option("--suggest", "Suggest commands to fix issues (default: true).")
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const pathsOpt = options.paths as string | undefined;
+        const dryRun = options.dryRun as boolean | undefined;
+        const jsonOutput = options.json as boolean | undefined;
+        const suggest = options.suggest !== false; // default true
+        const paths = pathsOpt
+          ? pathsOpt.split(",").map((s: string) => s.trim()).filter(Boolean)
+          : undefined;
+        const cwd = Deno.cwd();
+
+        const result = await envDoctor(cwd, { paths, dryRun, suggest });
+
+        if (jsonOutput) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          if (result.findings.length === 0) {
+            console.log("No .env files found. Nothing to check.");
+            return;
+          }
+
+          for (const finding of result.findings) {
+            const icon = finding.severity === "warning" ? "\u26A0" : "\u2139";
+            console.log(`${icon} ${finding.message}`);
+          }
+
+          if (result.hasWarnings) {
+            console.log(
+              "\n\u26A0 Warnings found. Consider running:",
+            );
+            console.log("  stackctl secrets encrypt  (to encrypt plaintext .env files)");
+            console.log("  stackctl secrets clean    (to remove plaintext after encryption)");
+          } else {
+            console.log("\nNo sensitive plaintext issues detected.");
+          }
+        }
+
+        if (result.hasWarnings) {
+          exitCode = ExitCode.DriftOrValidation;
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        exitCode = ExitCode.UnexpectedError;
+      }
     });
 
   // --- plan (issue #15) ---

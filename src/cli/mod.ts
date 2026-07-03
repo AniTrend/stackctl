@@ -4,11 +4,26 @@ import { initConfig } from "../config/mod.ts";
 import { resolveConfig } from "../config/mod.ts";
 import { ExitCode } from "../config/types.ts";
 import { generateStacks } from "../compose/mod.ts";
+import { discoverComposeFiles } from "../compose/discover.ts";
 import type { ComposeData, GenerateOptions } from "../compose/mod.ts";
 import { join, resolve } from "@std/path";
 import { ensureDir, exists } from "@std/fs";
 import { parse as parseYaml, stringify as stringifyYaml } from "@std/yaml";
 import { renderStack } from "../render/mod.ts";
+import { RealProcessRunner } from "../process/runner.ts";
+import { sync as syncValidation } from "../compose/sync.ts";
+import {
+  dockerComposeConfig,
+  dockerInfo,
+  dockerServiceLogs,
+  dockerStackDeploy,
+  dockerStackPs,
+  dockerStackRm,
+  dockerStackServices,
+  dockerSwarmStatus,
+} from "../docker/mod.ts";
+
+let exitCode = 0;
 
 /**
  * Parse and execute CLI commands.
@@ -17,7 +32,10 @@ import { renderStack } from "../render/mod.ts";
 export async function main(args: string[]): Promise<number> {
   try {
     const cmd = await buildCli().parse(args);
-    return cmd instanceof Error ? 1 : 0;
+    if (cmd instanceof Error) {
+      exitCode = 1;
+    }
+    return exitCode;
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
     return 1;
@@ -44,7 +62,7 @@ export function buildCli(): Command {
   // Default action: show help when no subcommand matches
   cli.action(() => {
     cli.showHelp();
-    Deno.exit(0);
+    exitCode = 0;
   });
 
   // --- init (issue #3) ---
@@ -67,7 +85,6 @@ export function buildCli(): Command {
         detect,
         preset,
         profile,
-        writeGitignore,
         force,
         dryRun,
         cwd: Deno.cwd(),
@@ -78,7 +95,8 @@ export function buildCli(): Command {
       }
 
       if (result.errors.length > 0) {
-        Deno.exit(2); // ExitCode.UserConfigError
+        exitCode = ExitCode.UserConfigError;
+        return;
       }
 
       if (dryRun) {
@@ -142,7 +160,8 @@ export function buildCli(): Command {
           for (const e of result.errors) {
             console.error(`error: ${e}`);
           }
-          Deno.exit(ExitCode.DriftOrValidation);
+          exitCode = ExitCode.DriftOrValidation;
+          return;
         }
 
         if (dryRun) {
@@ -157,7 +176,7 @@ export function buildCli(): Command {
         }
       } catch (err: unknown) {
         console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
-        Deno.exit(ExitCode.UnexpectedError);
+        exitCode = ExitCode.UnexpectedError;
       }
     });
 
@@ -201,7 +220,8 @@ export function buildCli(): Command {
 
         if (genResult.errors.length > 0) {
           for (const e of genResult.errors) console.error(`error: ${e}`);
-          Deno.exit(ExitCode.DriftOrValidation);
+          exitCode = ExitCode.DriftOrValidation;
+          return;
         }
 
         // 2. Render each generated stack
@@ -253,38 +273,225 @@ export function buildCli(): Command {
         }
 
         if (strict && hasUnresolved) {
-          Deno.exit(ExitCode.DriftOrValidation);
+          exitCode = ExitCode.DriftOrValidation;
         }
       } catch (err: unknown) {
         console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
-        Deno.exit(ExitCode.UnexpectedError);
+        exitCode = ExitCode.UnexpectedError;
       }
     });
 
   // --- up (issue #6) ---
   cli.command("up", "Deploy stacks to Docker Swarm.")
-    .option("--no-logs", "Do not follow logs after deploy.")
+    .option("--follow-logs", "Follow logs after deploy.")
     .option("--dry-run", "Print planned actions without executing.")
-    .option("--skip-generate", "Skip stack generation step.")
-    .option("--allow-unrendered", "Deploy unrendered stack files (not recommended).")
+    .option("--detach", "Exit immediately without waiting for services to converge.")
+    .option("--prune", "Prune obsolete services.")
     .option("--stacks <names:string>", "Comma-separated list of stack names to deploy.")
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--override <files:string>", "Comma-separated list of override files.")
-    .action(() => {
-      console.error("up: not yet implemented (issue #6)");
-      Deno.exit(1);
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const dryRun = options.dryRun as boolean | undefined;
+        const followLogs = options.followLogs as boolean | undefined;
+        const detach = options.detach as boolean | undefined;
+        const prune = options.prune as boolean | undefined;
+
+        const stacks = options.stacks
+          ? (options.stacks as string).split(",").map((s: string) => s.trim())
+          : undefined;
+
+        const overrides = options.override
+          ? (options.override as string).split(",").map((s: string) => s.trim())
+          : undefined;
+
+        const config = await resolveConfig({ profile, cwd: Deno.cwd() });
+        const repoRoot = config.base.repoRoot ?? Deno.cwd();
+
+        const runner = new RealProcessRunner(dryRun ?? false);
+
+        // 1. Discover or use specified stacks
+        const discovery = await discoverComposeFiles({ repoRoot });
+        const targetStacks = stacks ?? Object.keys(discovery.stacks);
+
+        if (targetStacks.length === 0) {
+          console.error("error: No stacks discovered.");
+          exitCode = ExitCode.DriftOrValidation;
+          return;
+        }
+
+        // 2. Generate stacks in memory
+        const genResult = await generateStacks({
+          stacks: targetStacks,
+          repoRoot,
+          outputDir: undefined,
+          dryRun: true,
+          overrides: overrides,
+        });
+
+        for (const w of genResult.warnings) console.error(`warning: ${w}`);
+        for (const e of genResult.errors) console.error(`error: ${e}`);
+
+        if (genResult.errors.length > 0) {
+          exitCode = ExitCode.DriftOrValidation;
+          return;
+        }
+
+        // 3. Render and deploy each stack
+        let deployFailed = false;
+        const deployedStacks: string[] = [];
+
+        for (const [stackName, yamlContent] of Object.entries(genResult.generated)) {
+          try {
+            const parsed = parseYaml(yamlContent) as ComposeData;
+            const renderResult = await renderStack({
+              data: parsed,
+              projectDir: repoRoot,
+              repoRoot,
+              strict: true,
+            });
+
+            for (const w of renderResult.warnings) {
+              console.error(`warning: [${stackName}] ${w}`);
+            }
+
+            if (dryRun) {
+              console.log(`[dry-run] would deploy: ${stackName}`);
+              deployedStacks.push(stackName);
+              continue;
+            }
+
+            // Write rendered YAML to temp file for docker stack deploy
+            const tempFile = await Deno.makeTempFile({ suffix: ".yml" });
+            try {
+              const yaml = stringifyYaml(renderResult.data, {
+                indent: 2,
+                lineWidth: 120,
+                noRefs: true,
+              } as Record<string, unknown>);
+              await Deno.writeTextFile(tempFile, yaml);
+
+              const deployResult = await dockerStackDeploy(runner, stackName, tempFile, {
+                prune,
+                detach,
+                resolveImage: "always",
+              });
+
+              if (deployResult.success) {
+                console.log(`Deployed: ${stackName}`);
+                deployedStacks.push(stackName);
+              } else {
+                console.error(
+                  `error deploying ${stackName}: ${deployResult.stderr || "failed"}`,
+                );
+                deployFailed = true;
+              }
+            } finally {
+              try {
+                await Deno.remove(tempFile);
+              } catch { /* ignore */ }
+            }
+          } catch (err: unknown) {
+            console.error(
+              `error: [${stackName}] ${err instanceof Error ? err.message : String(err)}`,
+            );
+            deployFailed = true;
+          }
+        }
+
+        if (deployFailed) {
+          exitCode = ExitCode.DriftOrValidation;
+          return;
+        }
+
+        // 4. Follow logs after deploy if requested
+        if (followLogs && !dryRun && deployedStacks.length > 0) {
+          console.log("\n--- Following logs (Ctrl-C to stop) ---");
+          const logRunner = new RealProcessRunner(false);
+          for (const stackName of deployedStacks) {
+            try {
+              const svcResult = await dockerStackServices(logRunner, stackName);
+              if (svcResult.success) {
+                const lines = svcResult.stdout.trim().split("\n").filter(Boolean);
+                for (const line of lines) {
+                  try {
+                    const svc = JSON.parse(line);
+                    if (svc.Name) {
+                      console.log(`\n=== ${svc.Name} ===`);
+                      await dockerServiceLogs(logRunner, svc.Name, {
+                        follow: true,
+                        tail: 10,
+                      });
+                    }
+                  } catch { /* skip malformed JSON lines */ }
+                }
+              }
+            } catch { /* logs are best-effort */ }
+          }
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        exitCode = ExitCode.UnexpectedError;
+      }
     });
 
   // --- down (issue #6) ---
-  cli.command("down", "Remove stacks from Docker Swarm.")
+  cli.command(
+    "down",
+    "Remove Docker Swarm stacks from the cluster.\n" +
+      "WARNING: This is a destructive operation. Running services, networks,\n" +
+      "and associated resources will be removed. Use --dry-run to preview\n" +
+      "without executing, and --yes to skip the confirmation prompt.",
+  )
     .option("--yes", "Skip confirmation prompt.")
     .option("--dry-run", "Print planned actions without executing.")
-    .option("--remove-network", "Also remove the configured overlay network.")
     .option("--stacks <names:string>", "Comma-separated list of stack names to remove.")
     .option("--profile <name:string>", "Use a specific profile.")
-    .action(() => {
-      console.error("down: not yet implemented (issue #6)");
-      Deno.exit(1);
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const dryRun = options.dryRun as boolean | undefined;
+        const skipConfirm = options.yes as boolean | undefined;
+
+        const config = await resolveConfig({ profile, cwd: Deno.cwd() });
+        const repoRoot = config.base.repoRoot ?? Deno.cwd();
+
+        const discovery = await discoverComposeFiles({ repoRoot });
+        const targetStacks = options.stacks
+          ? (options.stacks as string).split(",").map((s: string) => s.trim())
+          : Object.keys(discovery.stacks);
+
+        if (targetStacks.length === 0) {
+          console.log("No stacks to remove.");
+          return;
+        }
+
+        // Confirmation prompt
+        if (!dryRun && !skipConfirm) {
+          console.log("The following stacks will be removed:");
+          for (const s of targetStacks) console.log(`  - ${s}`);
+          const answer = prompt("Proceed? [y/N] ");
+          if (!answer || answer.toLowerCase() !== "y") {
+            console.log("Aborted.");
+            return;
+          }
+        }
+
+        const runner = new RealProcessRunner(dryRun ?? false);
+
+        for (const stackName of targetStacks) {
+          const result = await dockerStackRm(runner, stackName);
+          if (result.success) {
+            console.log(`${dryRun ? "[dry-run] would remove" : "Removed"}: ${stackName}`);
+          } else {
+            console.error(`error removing ${stackName}: ${result.stderr || "failed"}`);
+          }
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        exitCode = ExitCode.UnexpectedError;
+      }
     });
 
   // --- status (issue #6) ---
@@ -292,9 +499,69 @@ export function buildCli(): Command {
     .option("--json", "Output JSON machine-readable status.")
     .option("--stacks <names:string>", "Comma-separated list of stack names.")
     .option("--profile <name:string>", "Use a specific profile.")
-    .action(() => {
-      console.error("status: not yet implemented (issue #6)");
-      Deno.exit(1);
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const jsonOutput = options.json as boolean | undefined;
+
+        const config = await resolveConfig({ profile, cwd: Deno.cwd() });
+        const repoRoot = config.base.repoRoot ?? Deno.cwd();
+
+        const discovery = await discoverComposeFiles({ repoRoot });
+        const targetStacks = options.stacks
+          ? (options.stacks as string).split(",").map((s: string) => s.trim())
+          : Object.keys(discovery.stacks);
+
+        if (targetStacks.length === 0) {
+          console.log(jsonOutput ? "{}" : "No stacks discovered.");
+          return;
+        }
+
+        const runner = new RealProcessRunner(false);
+        const statusResult: Record<string, unknown> = {};
+
+        for (const stackName of targetStacks) {
+          if (jsonOutput) {
+            const svcResult = await dockerStackServices(runner, stackName);
+            const psResult = await dockerStackPs(runner, stackName);
+
+            const services: unknown[] = [];
+            if (svcResult.success) {
+              for (const line of svcResult.stdout.trim().split("\n").filter(Boolean)) {
+                try {
+                  services.push(JSON.parse(line));
+                } catch { /* skip */ }
+              }
+            }
+
+            const tasks: unknown[] = [];
+            if (psResult.success) {
+              for (const line of psResult.stdout.trim().split("\n").filter(Boolean)) {
+                try {
+                  tasks.push(JSON.parse(line));
+                } catch { /* skip */ }
+              }
+            }
+
+            statusResult[stackName] = { services, tasks };
+          } else {
+            console.log(`\n=== ${stackName} ===`);
+            const svcResult = await dockerStackServices(runner, stackName);
+            if (svcResult.success) {
+              console.log(svcResult.stdout || "  (no services)");
+            } else {
+              console.error(`  error: ${svcResult.stderr || "failed to list services"}`);
+            }
+          }
+        }
+
+        if (jsonOutput) {
+          console.log(JSON.stringify(statusResult, null, 2));
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        exitCode = ExitCode.UnexpectedError;
+      }
     });
 
   // --- logs (issue #6) ---
@@ -302,9 +569,59 @@ export function buildCli(): Command {
     .arguments("[services...:string]")
     .option("--stacks <names:string>", "Comma-separated list of stack names.")
     .option("--profile <name:string>", "Use a specific profile.")
-    .action(() => {
-      console.error("logs: not yet implemented (issue #6)");
-      Deno.exit(1);
+    .option("--follow", "Follow log output (default: true).")
+    .option("--tail <n:number>", "Number of lines from end (default: all).")
+    .action(async (options: Record<string, unknown>, ...serviceArgs: string[]) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const follow = options.follow !== false;
+        const tail = options.tail as number | undefined;
+        const services = serviceArgs.length > 0 ? serviceArgs : undefined;
+
+        const config = await resolveConfig({ profile, cwd: Deno.cwd() });
+        const repoRoot = config.base.repoRoot ?? Deno.cwd();
+
+        const runner = new RealProcessRunner(false);
+
+        // If explicit services provided, tail them directly
+        if (services && services.length > 0) {
+          for (const svc of services) {
+            console.log(`=== ${svc} ===`);
+            await dockerServiceLogs(runner, svc, { follow, tail });
+          }
+          return;
+        }
+
+        // Otherwise discover stacks and tail all services
+        const stacks = options.stacks
+          ? (options.stacks as string).split(",").map((s: string) => s.trim())
+          : undefined;
+
+        const discovery = await discoverComposeFiles({ repoRoot });
+        const targetStacks = stacks ?? Object.keys(discovery.stacks);
+
+        for (const stackName of targetStacks) {
+          const svcResult = await dockerStackServices(runner, stackName);
+          if (!svcResult.success) {
+            console.error(`error listing services for ${stackName}: ${svcResult.stderr}`);
+            continue;
+          }
+
+          const lines = svcResult.stdout.trim().split("\n").filter(Boolean);
+          for (const line of lines) {
+            try {
+              const svc = JSON.parse(line);
+              if (svc.Name) {
+                console.log(`=== ${svc.Name} ===`);
+                await dockerServiceLogs(runner, svc.Name, { follow, tail });
+              }
+            } catch { /* skip */ }
+          }
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        exitCode = ExitCode.UnexpectedError;
+      }
     });
 
   // --- sync (issue #6) ---
@@ -312,9 +629,43 @@ export function buildCli(): Command {
     .option("--quiet", "Suppress diff output.")
     .option("--non-interactive", "Skip confirmation; exit 1 on drift.")
     .option("--profile <name:string>", "Use a specific profile.")
-    .action(() => {
-      console.error("sync: not yet implemented (issue #6)");
-      Deno.exit(1);
+    .option("--stacks <names:string>", "Comma-separated list of stack names.")
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const quiet = options.quiet as boolean | undefined;
+        const nonInteractive = options.nonInteractive as boolean | undefined;
+        const stacks = options.stacks
+          ? (options.stacks as string).split(",").map((s: string) => s.trim())
+          : undefined;
+
+        const result = await syncValidation({
+          stacks,
+          profile,
+          quiet,
+          nonInteractive,
+        });
+
+        for (const w of result.warnings) console.error(`warning: ${w}`);
+        for (const e of result.errors) console.error(`error: ${e}`);
+
+        if (!result.match) {
+          if (!quiet) {
+            for (const [stackName, diff] of Object.entries(result.diffs)) {
+              if (diff) {
+                console.log(`\n--- ${stackName} diff ---`);
+                console.log(diff);
+              }
+            }
+          }
+          exitCode = ExitCode.DriftOrValidation;
+        } else {
+          console.log("Sync OK: generated stacks match committed files.");
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        exitCode = ExitCode.UnexpectedError;
+      }
     });
 
   // --- doctor (issue #6) ---
@@ -322,9 +673,148 @@ export function buildCli(): Command {
     .option("--fix-volumes", "Create missing external volumes.")
     .option("--check-secrets", "Also check for secrets tooling (sops, age).")
     .option("--profile <name:string>", "Use a specific profile.")
-    .action(() => {
-      console.error("doctor: not yet implemented (issue #6)");
-      Deno.exit(1);
+    .action(async (options: Record<string, unknown>) => {
+      const issues: string[] = [];
+      const checks: string[] = [];
+
+      const profile = options.profile as string | undefined;
+      const checkSecrets = options.checkSecrets as boolean | undefined;
+
+      const runner = new RealProcessRunner(false);
+
+      // 1. Check Docker installed and running
+      checks.push("Docker installed and running...");
+      try {
+        const infoResult = await dockerInfo(runner);
+        if (infoResult.success) {
+          checks.push("  \u2713 Docker is running");
+        } else {
+          issues.push("Docker is not running or not accessible.");
+        }
+      } catch {
+        issues.push("Docker command not found. Is Docker installed?");
+      }
+
+      // 2. Check Docker Swarm mode
+      checks.push("Docker Swarm mode...");
+      try {
+        const swarm = await dockerSwarmStatus(runner);
+        if (swarm.active) {
+          checks.push(
+            `  \u2713 Swarm mode active${swarm.nodeId ? ` (node: ${swarm.nodeId})` : ""}`,
+          );
+        } else {
+          issues.push("Docker is not in Swarm mode. Run: docker swarm init");
+        }
+      } catch {
+        issues.push("Could not determine Swarm status.");
+      }
+
+      // 3. Check config file exists and is valid
+      checks.push("Config file...");
+      try {
+        const config = await resolveConfig({ profile, cwd: Deno.cwd() });
+        checks.push(`  \u2713 Config resolved (profile: ${config.profile ?? "default"})`);
+        checks.push(`    Project: ${config.base.project || "(unnamed)"}`);
+        checks.push(`    Stack directory: ${config.base.stack.directory}`);
+        checks.push(`    Stack names: ${config.base.stack.names.join(", ") || "(none)"}`);
+
+        // Check override files referenced in config exist
+        for (const override of config.overrides) {
+          const existsInFs = await exists(override.path);
+          if (!existsInFs) {
+            issues.push(`Override file not found: ${override.path}`);
+          } else {
+            checks.push(`  \u2713 Override: ${override.path}`);
+          }
+        }
+
+        // Render path validation
+        checks.push("Render path...");
+        const repoRootPath = config.base.repoRoot ?? Deno.cwd();
+        const renderDir = join(repoRootPath, config.base.render.outputDirectory);
+        try {
+          await Deno.stat(renderDir);
+          checks.push(`  \u2713 Render directory exists: ${renderDir}`);
+        } catch {
+          try {
+            await Deno.mkdir(renderDir);
+            checks.push(`  \u2713 Render directory created (and removed): ${renderDir}`);
+            await Deno.remove(renderDir);
+          } catch {
+            issues.push(`Render directory not creatable: ${renderDir}`);
+          }
+        }
+
+        // Validate stack files with docker compose config
+        checks.push("Compose file validation...");
+        for (const stackName of config.base.stack.names) {
+          const composeFile = join(
+            repoRootPath,
+            config.base.stack.directory,
+            `${stackName}.yml`,
+          );
+          try {
+            await Deno.stat(composeFile);
+          } catch {
+            issues.push(`Stack file not found: ${composeFile}`);
+            continue;
+          }
+
+          try {
+            const composeResult = await dockerComposeConfig(runner, composeFile);
+            if (composeResult.success) {
+              checks.push(`  \u2713 Stack "${stackName}" compose file is valid`);
+            } else {
+              issues.push(
+                `Stack "${stackName}" compose file has errors:\n${composeResult.stderr}`,
+              );
+            }
+          } catch {
+            issues.push(`docker compose config failed for stack "${stackName}"`);
+          }
+        }
+      } catch (err: unknown) {
+        issues.push(
+          `Config error: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
+      // 4. Check sops/age available (if secrets configured)
+      if (checkSecrets) {
+        checks.push("Secrets tooling...");
+        const sopsOk = await runner.which("sops");
+        const ageOk = await runner.which("age");
+        if (sopsOk) {
+          checks.push("  \u2713 sops available");
+        } else {
+          issues.push("sops not found on PATH. Install: https://github.com/getsops/sops");
+        }
+        if (ageOk) {
+          checks.push("  \u2713 age available");
+        } else {
+          issues.push("age not found on PATH. Install: https://github.com/FiloSottile/age");
+        }
+      }
+
+      // 5. Check for external volumes (if --fix-volumes)
+      if (options.fixVolumes as boolean | undefined) {
+        checks.push("External volumes: not yet implemented");
+      }
+
+      // Output results
+      console.log("=== stackctl doctor ===\n");
+      for (const c of checks) console.log(c);
+      console.log("");
+
+      if (issues.length > 0) {
+        console.error("Issues found:");
+        for (const issue of issues) console.error(`  \u2717 ${issue}`);
+        console.error(`\n${issues.length} issue(s) found.`);
+        exitCode = ExitCode.MissingDependency;
+      } else {
+        console.log("All checks passed.");
+      }
     });
 
   // --- reload (issue #9) ---
@@ -338,7 +828,7 @@ export function buildCli(): Command {
     .option("--dry-run", "Print planned actions without executing.")
     .action(() => {
       console.error("reload: not yet implemented (issue #9)");
-      Deno.exit(1);
+      exitCode = 1;
     });
 
   // --- secrets (issue #7) ---
@@ -349,7 +839,7 @@ export function buildCli(): Command {
     .option("--dry-run", "Print planned actions without executing.")
     .action(() => {
       console.error("secrets encrypt: not yet implemented (issue #7)");
-      Deno.exit(1);
+      exitCode = 1;
     });
   secretsCmd.command("decrypt", "Decrypt encrypted .env files to plaintext.")
     .arguments("[services...:string]")
@@ -357,7 +847,7 @@ export function buildCli(): Command {
     .option("--dry-run", "Print planned actions without executing.")
     .action(() => {
       console.error("secrets decrypt: not yet implemented (issue #7)");
-      Deno.exit(1);
+      exitCode = 1;
     });
   secretsCmd.command("deploy", "Decrypt and deploy stacks with secret values.")
     .arguments("[services...:string]")
@@ -365,20 +855,20 @@ export function buildCli(): Command {
     .option("--dry-run", "Print planned actions without executing.")
     .action(() => {
       console.error("secrets deploy: not yet implemented (issue #7)");
-      Deno.exit(1);
+      exitCode = 1;
     });
   secretsCmd.command("clean", "Remove plaintext .env files that have encrypted counterparts.")
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--dry-run", "Print planned actions without executing.")
     .action(() => {
       console.error("secrets clean: not yet implemented (issue #7)");
-      Deno.exit(1);
+      exitCode = 1;
     });
   secretsCmd.command("check", "Check secrets tooling availability.")
     .option("--profile <name:string>", "Use a specific profile.")
     .action(() => {
       console.error("secrets check: not yet implemented (issue #7)");
-      Deno.exit(1);
+      exitCode = 1;
     });
 
   // --- env (issue #14) ---
@@ -394,7 +884,7 @@ export function buildCli(): Command {
     .option("--materialize", "Materialize profile preset env values.")
     .action(() => {
       console.error("env: not yet implemented (issue #14)");
-      Deno.exit(1);
+      exitCode = 1;
     });
 
   // --- plan (issue #15) ---
@@ -406,7 +896,7 @@ export function buildCli(): Command {
     .option("--json", "Output machine-readable JSON.")
     .action(() => {
       console.error("plan: not yet implemented (issue #15)");
-      Deno.exit(1);
+      exitCode = 1;
     });
 
   // --- completions (issue #10) ---
@@ -414,17 +904,17 @@ export function buildCli(): Command {
   completionsCmd.command("bash", "Generate bash completion script.")
     .action(() => {
       console.error("completions bash: not yet implemented (issue #10)");
-      Deno.exit(1);
+      exitCode = 1;
     });
   completionsCmd.command("zsh", "Generate zsh completion script.")
     .action(() => {
       console.error("completions zsh: not yet implemented (issue #10)");
-      Deno.exit(1);
+      exitCode = 1;
     });
   completionsCmd.command("fish", "Generate fish completion script.")
     .action(() => {
       console.error("completions fish: not yet implemented (issue #10)");
-      Deno.exit(1);
+      exitCode = 1;
     });
 
   return cli as unknown as Command;

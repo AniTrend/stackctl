@@ -1,0 +1,163 @@
+name: Setup stackctl
+description: Install the stackctl binary for use in GitHub Actions workflows
+author: AniTrend
+
+branding:
+  icon: layers
+  color: green
+
+inputs:
+  version:
+    description: >
+      Version of stackctl to install (without the 'v' prefix).
+      Use 'latest' to resolve the latest GitHub Release.
+      Example: '0.1.0'
+    required: false
+    default: latest
+  github-token:
+    description: GitHub token for API requests (defaults to github.token)
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install stackctl
+      shell: bash
+      env:
+        INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+
+        # ------------------------------------------------------------------
+        # Map GitHub Actions runner context to target triples
+        # ------------------------------------------------------------------
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64)   target_triple="x86_64-unknown-linux-gnu" ;;
+          Linux-ARM64) target_triple="aarch64-unknown-linux-gnu" ;;
+          macOS-X64)   target_triple="x86_64-apple-darwin" ;;
+          macOS-ARM64) target_triple="aarch64-apple-darwin" ;;
+          *)
+            echo "::error::Unsupported runner: ${RUNNER_OS} ${RUNNER_ARCH}"
+            exit 1
+            ;;
+        esac
+
+        echo "Platform: ${RUNNER_OS} ${RUNNER_ARCH}  →  target triple: ${target_triple}"
+
+        # ------------------------------------------------------------------
+        # Resolve version (latest via GitHub API, or explicit tag)
+        #
+        # NOTE: This action uses curl for API calls. If you need to resolve
+        # the latest release via the GitHub CLI instead, the `gh` tool must
+        # be available in the runner environment and you can replace the
+        # curl block with:
+        #   resolved=$(gh release view --repo AniTrend/stackctl --json tagName -q .tagName)
+        # ------------------------------------------------------------------
+        version_raw="${{ inputs.version }}"
+
+        if [ "$version_raw" = "latest" ]; then
+          echo "Resolving latest release from AniTrend/stackctl..."
+          resolved=$(curl -sSfL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: token ${INPUT_GITHUB_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/AniTrend/stackctl/releases/latest \
+            | tr -d '\n\r' \
+            | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' \
+            | head -1 \
+            | sed 's/.*"\(.*\)"/\1/') || {
+            echo "::error::Failed to resolve latest release"
+            exit 1
+          }
+
+          if [ -z "$resolved" ]; then
+            echo "::error::Failed to parse tag_name from GitHub API response"
+            exit 1
+          fi
+
+          echo "Latest release resolved: ${resolved}"
+          tag="$resolved"
+        else
+          # Normalize: if version already starts with 'v', use as-is;
+          # otherwise prepend 'v'
+          if [[ "$version_raw" == v* ]]; then
+            tag="$version_raw"
+          else
+            tag="v${version_raw}"
+          fi
+        fi
+
+        # Derive a clean version string for the cache path (strip leading v)
+        cache_version="${tag#v}"
+
+        # ------------------------------------------------------------------
+        # Install directory  (RUNNER_TOOL_CACHE / stackctl / version / arch)
+        # ------------------------------------------------------------------
+        install_dir="${RUNNER_TOOL_CACHE}/stackctl/${cache_version}/${RUNNER_ARCH}"
+        mkdir -p "$install_dir"
+
+        # ------------------------------------------------------------------
+        # Download tarball and checksums.txt from GitHub Releases
+        # ------------------------------------------------------------------
+        tarball="stackctl-${tag}-${target_triple}.tar.gz"
+        base_url="https://github.com/AniTrend/stackctl/releases/download/${tag}"
+        tarball_url="${base_url}/${tarball}"
+        checksum_url="${base_url}/checksums.txt"
+
+        echo "Downloading ${tarball} (${tag})..."
+        curl -fsSL --retry 3 --retry-delay 1 -o "${install_dir}/${tarball}" "$tarball_url" || {
+          echo "::error::Failed to download ${tarball_url}"
+          exit 1
+        }
+
+        echo "Downloading checksums.txt..."
+        curl -fsSL --retry 3 --retry-delay 1 -o "${install_dir}/checksums.txt" "$checksum_url" || {
+          echo "::error::Failed to download ${checksum_url}"
+          exit 1
+        }
+
+        # ------------------------------------------------------------------
+        # Verify SHA256 checksum  (shasum -a 256 -c is portable across macOS and Linux)
+        # ------------------------------------------------------------------
+        echo "Verifying SHA256 checksum..."
+        cd "$install_dir"
+
+        checksum_line=$(grep -F "${tarball}" checksums.txt)
+        if [ -z "$checksum_line" ]; then
+          echo "::error::Could not find checksum for ${tarball} in checksums.txt"
+          exit 1
+        fi
+
+        echo "$checksum_line" | shasum -a 256 -c || {
+          echo "::error::SHA256 checksum verification failed for ${tarball}"
+          exit 1
+        }
+        echo "Checksum OK"
+
+        # ------------------------------------------------------------------
+        # Extract tarball
+        # ------------------------------------------------------------------
+        echo "Extracting ${tarball}..."
+        tar -xzf "${tarball}" || {
+          echo "::error::Failed to extract ${tarball}"
+          exit 1
+        }
+
+        # Ensure the stackctl binary exists after extraction
+        if [ ! -f "stackctl" ]; then
+          echo "::error::stackctl binary not found after extracting ${tarball}"
+          exit 1
+        fi
+
+        # ------------------------------------------------------------------
+        # Make binary executable
+        # ------------------------------------------------------------------
+        chmod +x stackctl
+
+        # ------------------------------------------------------------------
+        # Add to PATH for subsequent workflow steps
+        # ------------------------------------------------------------------
+        echo "$install_dir" >> "$GITHUB_PATH"
+
+        echo "stackctl ${tag} (${target_triple}) installed to ${install_dir}"

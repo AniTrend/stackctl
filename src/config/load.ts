@@ -181,6 +181,9 @@ export async function resolveConfig(
     localConfig,
     localProfileConfig,
     overrides: [],
+    baseConfigPath: discovery?.configPath,
+    profileConfigPath: discovery?.profilePath,
+    localConfigPath: discovery?.localPath,
   };
 }
 

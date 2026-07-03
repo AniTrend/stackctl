@@ -107,6 +107,12 @@ export interface ResolvedConfig {
   localProfileConfig?: ProfileConfig;
   /** Override files discovered or provided. */
   overrides: OverrideEntry[];
+  /** Absolute path to the discovered or explicit .stackctl base config file. */
+  baseConfigPath?: string;
+  /** Absolute path to the .stackctl.<profile> file, if it exists. */
+  profileConfigPath?: string;
+  /** Absolute path to the .stackctl.local file, if it exists. */
+  localConfigPath?: string;
 }
 
 /** Exit code constants. */

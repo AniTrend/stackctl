@@ -33,6 +33,9 @@ import {
 import type { EnvDiff } from "../env/types.ts";
 import { reloadStacks } from "../compose/reload.ts";
 import type { ReloadResult } from "../compose/reload.ts";
+import { planOperation } from "../compose/plan.ts";
+import type { PlanResult } from "../compose/plan.ts";
+import { CompletionsCommand } from "@cliffy/command/completions";
 import {
   checkTooling,
   cleanDecryptedEnvFiles,
@@ -63,9 +66,23 @@ export async function main(args: string[]): Promise<number> {
 }
 
 /**
+ * Best-effort stack-name completion provider.
+ * Returns stack names discovered from the repository.
+ * Never throws — returns an empty array if config or discovery fails.
+ */
+async function completeStackNames(): Promise<string[]> {
+  try {
+    const config = await resolveConfig({ profile: undefined, cwd: Deno.cwd() });
+    const repoRoot = config.base.repoRoot ?? Deno.cwd();
+    const discovery = await discoverComposeFiles({ repoRoot });
+    return Object.keys(discovery.stacks);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Build the stackctl CLI command tree.
- * Commands are registered here in their skeleton form;
- * full implementations are added in subsequent issues.
  */
 export function buildCli(): Command {
   const cli = new Command()
@@ -1470,31 +1487,98 @@ export function buildCli(): Command {
   cli.command("plan", "Produce a deterministic plan of what an operation would do.")
     .arguments("<operation:string>")
     .option("--profile <name:string>", "Use a specific profile.")
-    .option("--stacks <names:string>", "Comma-separated list of stack names.")
+    .option("--stacks <names:string>", "Comma-separated list of stack names.", {
+      complete: completeStackNames,
+    } as any)
     .option("--override <files:string>", "Comma-separated list of override files.")
     .option("--json", "Output machine-readable JSON.")
-    .action(() => {
-      console.error("plan: not yet implemented (issue #15)");
-      exitCode = 1;
+    .description(
+      "Shows a structured summary of what the specified operation would do without executing it.\n\n" +
+        "Supported operations:\n" +
+        "  up       - Preview stack deployment\n" +
+        "  down     - Preview stack removal\n" +
+        "  sync     - Preview full generate+render+deploy pipeline\n" +
+        "  generate - Preview stack generation only\n" +
+        "  render   - Preview rendering only\n" +
+        "  reload   - Preview config-first reload\n" +
+        "  env      - Preview env file scaffolding\n" +
+        "  secrets  - Preview secrets workflow\n" +
+        "  all      - Preview everything",
+    )
+    .example(
+      "Preview what would happen during a sync",
+      "stackctl plan sync",
+    )
+    .example(
+      "Preview with a specific profile",
+      "stackctl plan up --profile staging",
+    )
+    .example(
+      "Preview specific stacks only",
+      "stackctl plan generate --stacks api,web",
+    )
+    .example(
+      "Machine-readable JSON output",
+      "stackctl plan all --json",
+    )
+    .action((opts: Record<string, unknown>, operation: string) => {
+      const profile = opts.profile as string | undefined;
+      const stacks = opts.stacks
+        ? (opts.stacks as string).split(",").map((s: string) => s.trim())
+        : undefined;
+      const overrides = opts.override
+        ? (opts.override as string).split(",").map((s: string) => s.trim())
+        : undefined;
+
+      planOperation({
+        operation,
+        profile,
+        stacks,
+        overrides,
+      })
+        .then((plan: PlanResult) => {
+          if (opts.json) {
+            console.log(JSON.stringify(plan.json, null, 2));
+            return;
+          }
+
+          // Human-readable output
+          console.log(`Plan: ${plan.operation}`);
+          console.log("=".repeat(40));
+
+          for (const section of plan.sections) {
+            console.log(`\n${section.title}`);
+            console.log("-".repeat(section.title.length));
+            for (const item of section.items) {
+              console.log(item);
+            }
+          }
+
+          if (plan.warnings.length > 0) {
+            console.log("\nWarnings:");
+            for (const w of plan.warnings) {
+              console.log(`  ! ${w}`);
+            }
+          }
+
+          if (plan.errors.length > 0) {
+            console.log("\nErrors:");
+            for (const e of plan.errors) {
+              console.log(`  ✗ ${e}`);
+            }
+            Deno.exit(ExitCode.DriftOrValidation);
+          }
+        })
+        .catch((err: unknown) => {
+          console.error(
+            `error: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          Deno.exit(ExitCode.UnexpectedError);
+        });
     });
 
   // --- completions (issue #10) ---
-  const completionsCmd = cli.command("completions", "Generate shell completion scripts.");
-  completionsCmd.command("bash", "Generate bash completion script.")
-    .action(() => {
-      console.error("completions bash: not yet implemented (issue #10)");
-      exitCode = 1;
-    });
-  completionsCmd.command("zsh", "Generate zsh completion script.")
-    .action(() => {
-      console.error("completions zsh: not yet implemented (issue #10)");
-      exitCode = 1;
-    });
-  completionsCmd.command("fish", "Generate fish completion script.")
-    .action(() => {
-      console.error("completions fish: not yet implemented (issue #10)");
-      exitCode = 1;
-    });
+  cli.command("completions", new CompletionsCommand());
 
   return cli as unknown as Command;
 }

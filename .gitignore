@@ -27,3 +27,4 @@ Thumbs.db
 
 # test coverage
 .coverage/
+cov/

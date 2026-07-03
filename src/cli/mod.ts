@@ -31,6 +31,15 @@ import {
   materializeEnvFromProfile,
 } from "../env/mod.ts";
 import type { EnvDiff } from "../env/types.ts";
+import {
+  checkTooling,
+  cleanDecryptedEnvFiles,
+  decryptEnvFile,
+  deployPipeline,
+  encryptEnvFile,
+  ensureTooling,
+  findEncryptedEnvFiles,
+} from "../secrets/mod.ts";
 
 let exitCode = 0;
 
@@ -841,43 +850,230 @@ export function buildCli(): Command {
     });
 
   // --- secrets (issue #7) ---
-  const secretsCmd = cli.command("secrets", "Manage SOPS/age encrypted secrets.");
-  secretsCmd.command("encrypt", "Encrypt .env files to encrypted output.")
-    .arguments("[services...:string]")
+  const secretsCmd = cli.command("secrets", "Manage SOPS/age encrypted secrets (dotenv).");
+
+  // secrets encrypt
+  secretsCmd.command("encrypt", "Encrypt .env files to .env.enc using SOPS+age.")
+    .arguments("[files...:string]")
+    .option("--dry-run", "Print planned actions without executing.")
+    .action(async (options: Record<string, unknown>, ...fileArgs: string[]) => {
+      try {
+        if (options.dryRun) {
+          console.log("[dry-run] Would encrypt .env files using SOPS (dotenv format)");
+        }
+
+        const runner = new RealProcessRunner(false);
+
+        // Ensure tooling before any mutation
+        await ensureTooling(runner);
+
+        // Determine files to encrypt
+        let files: string[] = fileArgs;
+        if (files.length === 0) {
+          // Discover .env files that don't have .enc counterparts
+          const encFiles = await findEncryptedEnvFiles(Deno.cwd());
+          const encFileDirs = new Set(
+            encFiles.map((f) => f.replace(/\.enc$/, "")),
+          );
+
+          // Walk for .env files
+          const { walk } = await import("@std/fs");
+          const allEnv: string[] = [];
+          for await (
+            const entry of walk(Deno.cwd(), {
+              includeDirs: false,
+              includeFiles: true,
+              skip: [/(^|\/)\.(git|rendered)$/, /node_modules/],
+            })
+          ) {
+            if (entry.name === ".env") {
+              allEnv.push(entry.path);
+            }
+          }
+          // Only include .env files that don't have .enc counterparts yet
+          files = allEnv.filter((f) => !encFileDirs.has(f));
+        }
+
+        if (files.length === 0) {
+          console.log("No .env files to encrypt.");
+          return;
+        }
+
+        let hasErrors = false;
+        for (const file of files) {
+          const result = await encryptEnvFile(file, runner);
+          if (result.success) {
+            console.log(`encrypted: ${file} -> ${result.outputPath}`);
+          } else {
+            console.error(`error encrypting ${file}: ${result.error}`);
+            hasErrors = true;
+          }
+        }
+
+        if (hasErrors) Deno.exit(ExitCode.DriftOrValidation);
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.MissingDependency);
+      }
+    });
+
+  // secrets decrypt
+  secretsCmd.command("decrypt", "Decrypt .env.enc files to .env using SOPS+age.")
+    .arguments("[files...:string]")
+    .option("--dry-run", "Print planned actions without executing.")
+    .action(async (options: Record<string, unknown>, ...fileArgs: string[]) => {
+      try {
+        const dryRun = options.dryRun as boolean | undefined;
+
+        if (dryRun) {
+          console.log("[dry-run] Would decrypt .env.enc files using SOPS (dotenv format)");
+        }
+
+        const runner = new RealProcessRunner(dryRun ?? false);
+
+        // Ensure tooling before any mutation
+        if (!dryRun) {
+          await ensureTooling(runner);
+        }
+
+        // Determine files to decrypt
+        let files: string[] = fileArgs;
+        if (files.length === 0) {
+          files = await findEncryptedEnvFiles(Deno.cwd());
+        }
+
+        if (files.length === 0) {
+          console.log("No .env.enc files to decrypt.");
+          return;
+        }
+
+        let hasErrors = false;
+        for (const file of files) {
+          const result = await decryptEnvFile(file, runner);
+          if (result.success) {
+            console.log(
+              `${dryRun ? "[dry-run] decrypted" : "decrypted"}: ${file} -> ${result.outputPath}`,
+            );
+            for (const w of result.warnings) {
+              console.error(`warning: ${w}`);
+            }
+          } else {
+            console.error(`error decrypting ${file}: ${result.error}`);
+            hasErrors = true;
+          }
+        }
+
+        if (hasErrors) Deno.exit(ExitCode.DriftOrValidation);
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.MissingDependency);
+      }
+    });
+
+  // secrets deploy
+  secretsCmd.command("deploy", "Decrypt env files and deploy stacks.")
+    .arguments("[stacks...:string]")
     .option("--profile <name:string>", "Use a specific profile.")
     .option("--dry-run", "Print planned actions without executing.")
-    .action(() => {
-      console.error("secrets encrypt: not yet implemented (issue #7)");
-      exitCode = 1;
+    .action(async (options: Record<string, unknown>, ...stackArgs: string[]) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const dryRun = options.dryRun as boolean | undefined;
+
+        const result = await deployPipeline({
+          cwd: Deno.cwd(),
+          profile,
+          stacks: stackArgs.length > 0 ? stackArgs : undefined,
+          dryRun,
+        });
+
+        for (const w of result.warnings) console.error(`warning: ${w}`);
+        for (const e of result.errors) console.error(`error: ${e}`);
+
+        if (result.errors.length > 0) {
+          Deno.exit(ExitCode.DriftOrValidation);
+        }
+
+        if (result.warnings.length === 0) {
+          console.log("Deploy pipeline completed successfully.");
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
     });
-  secretsCmd.command("decrypt", "Decrypt encrypted .env files to plaintext.")
-    .arguments("[services...:string]")
-    .option("--profile <name:string>", "Use a specific profile.")
+
+  // secrets clean
+  secretsCmd.command("clean", "Remove decrypted .env files securely (shred + rm).")
     .option("--dry-run", "Print planned actions without executing.")
-    .action(() => {
-      console.error("secrets decrypt: not yet implemented (issue #7)");
-      exitCode = 1;
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const dryRun = options.dryRun as boolean | undefined;
+        const cwd = Deno.cwd();
+
+        // Find .env files that have .env.enc counterparts
+        const encFiles = await findEncryptedEnvFiles(cwd);
+        const decryptedFiles = encFiles.map((f) => f.replace(/\.enc$/, ""));
+
+        if (decryptedFiles.length === 0) {
+          console.log("No decrypted .env files to clean.");
+          return;
+        }
+
+        const runner = new RealProcessRunner(dryRun ?? false);
+
+        const result = await cleanDecryptedEnvFiles(
+          decryptedFiles,
+          dryRun,
+          runner,
+        );
+
+        if (result.removedFiles.length === 0) {
+          console.log("Nothing to clean.");
+        } else {
+          const prefix = dryRun ? "[dry-run] would remove" : "removed";
+          for (const f of result.removedFiles) {
+            console.log(`${prefix}: ${f}`);
+          }
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
     });
-  secretsCmd.command("deploy", "Decrypt and deploy stacks with secret values.")
-    .arguments("[services...:string]")
-    .option("--profile <name:string>", "Use a specific profile.")
-    .option("--dry-run", "Print planned actions without executing.")
-    .action(() => {
-      console.error("secrets deploy: not yet implemented (issue #7)");
-      exitCode = 1;
-    });
-  secretsCmd.command("clean", "Remove plaintext .env files that have encrypted counterparts.")
-    .option("--profile <name:string>", "Use a specific profile.")
-    .option("--dry-run", "Print planned actions without executing.")
-    .action(() => {
-      console.error("secrets clean: not yet implemented (issue #7)");
-      exitCode = 1;
-    });
+
+  // secrets check
   secretsCmd.command("check", "Check secrets tooling availability.")
-    .option("--profile <name:string>", "Use a specific profile.")
-    .action(() => {
-      console.error("secrets check: not yet implemented (issue #7)");
-      exitCode = 1;
+    .action(async () => {
+      try {
+        const runner = new RealProcessRunner(false);
+
+        // Check tooling (throws if missing)
+        try {
+          await ensureTooling(runner);
+        } catch (err: unknown) {
+          console.error(err instanceof Error ? err.message : String(err));
+          Deno.exit(ExitCode.MissingDependency);
+        }
+
+        // Get version info
+        const status = await checkTooling(runner);
+
+        console.log("Secrets Tooling Status:");
+        console.log(`  sops: ${status.sops.available ? "available" : "not found"}`);
+        if (status.sops.version) {
+          console.log(`    version: ${status.sops.version}`);
+        }
+        console.log(`  age:  ${status.age.available ? "available" : "not found"}`);
+        if (status.age.version) {
+          console.log(`    version: ${status.age.version}`);
+        }
+
+        console.log("\nAll secrets tooling is available.");
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
     });
 
   // --- env (issue #14) ---

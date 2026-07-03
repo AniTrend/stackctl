@@ -31,6 +31,8 @@ import {
   materializeEnvFromProfile,
 } from "../env/mod.ts";
 import type { EnvDiff } from "../env/types.ts";
+import { reloadStacks } from "../compose/reload.ts";
+import type { ReloadResult } from "../compose/reload.ts";
 import {
   checkTooling,
   cleanDecryptedEnvFiles,
@@ -836,17 +838,99 @@ export function buildCli(): Command {
     });
 
   // --- reload (issue #9) ---
+  //
+  // Option precedence (highest to lowest):
+  //   CLI flag > active profile config > base config > built-in default
+  //
+  // Safety: reload only deploys/updates. It never schedules `docker stack rm`,
+  // `docker network rm`, or `docker volume rm`.
   cli.command("reload", "Re-render and redeploy stacks without tearing down.")
-    .option("--force-service-update", "Force update all services after deploy.")
-    .option("--no-force-service-update", "Skip force update (config override).")
-    .option("--no-generate", "Skip stack generation step.")
-    .option("--stacks <names:string>", "Comma-separated list of stack names.")
+    .option("--skip-generate", "Only re-render and re-deploy, do not regenerate stacks.")
+    .option(
+      "--skip-unchanged",
+      "Only redeploy stacks whose rendered output changed (default: always deploy).",
+    )
+    .option(
+      "--force-service-update",
+      "Force `docker service update --force` on every service after deploy.",
+    )
+    .option(
+      "--no-force-service-update",
+      "Disable force service update (overrides config).",
+    )
+    .option("--follow-logs", "Stream logs for deployed stacks after reload.")
+    .option("--stacks <names:string>", "Comma-separated list of stack names to reload.")
     .option("--profile <name:string>", "Use a specific profile.")
-    .option("--override <files:string>", "Comma-separated list of override files.")
-    .option("--dry-run", "Print planned actions without executing.")
-    .action(() => {
-      console.error("reload: not yet implemented (issue #9)");
-      exitCode = 1;
+    .option("--config <path:string>", "Explicit path to .stackctl config file.")
+    .option("--override <files:string>", "Comma-separated list of override files to apply.")
+    .option("--dry-run", "Compare and report planned actions without executing.")
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const dryRun = options.dryRun as boolean | undefined;
+        const skipGenerate = options.skipGenerate as boolean | undefined;
+        const skipUnchanged = options.skipUnchanged as boolean | undefined;
+        const followLogs = options.followLogs as boolean | undefined;
+        const configPath = options.config as string | undefined;
+
+        // forceServiceUpdate: CLI false > CLI true > absent (uses config default)
+        const forceServiceUpdate = options.forceServiceUpdate !== undefined
+          ? (options.forceServiceUpdate as boolean)
+          : options.noForceServiceUpdate !== undefined
+          ? false
+          : undefined;
+
+        const stacks = options.stacks
+          ? (options.stacks as string).split(",").map((s: string) => s.trim())
+          : undefined;
+
+        const overrides = options.override
+          ? (options.override as string).split(",").map((s: string) => s.trim())
+          : undefined;
+
+        const config = await resolveConfig({
+          configPath,
+          profile,
+          cwd: Deno.cwd(),
+        });
+
+        const runner = new RealProcessRunner(dryRun ?? false);
+
+        const results = await reloadStacks({
+          config,
+          runner,
+          stacks,
+          skipGenerate,
+          skipUnchanged,
+          dryRun,
+          followLogs,
+          forceServiceUpdate,
+          profile,
+          overrides,
+        });
+
+        // Report results
+        for (const r of results) {
+          const icon = r.action === "deployed"
+            ? "✓"
+            : r.action === "unchanged"
+            ? "·"
+            : r.action === "would-deploy"
+            ? "[dry-run] would deploy"
+            : r.action === "would-skip"
+            ? "[dry-run] unchanged"
+            : "✗";
+          console.log(`${icon} ${r.stack}`);
+          if (r.error) console.error(`  error: ${r.error}`);
+        }
+
+        if (results.some((r: ReloadResult) => r.action === "error")) {
+          Deno.exit(ExitCode.DriftOrValidation);
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        Deno.exit(ExitCode.UnexpectedError);
+      }
     });
 
   // --- secrets (issue #7) ---

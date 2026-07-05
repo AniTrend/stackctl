@@ -28,3 +28,6 @@ Thumbs.db
 # test coverage
 .coverage/
 cov/
+
+# deepwork session state
+.slim/deepwork/

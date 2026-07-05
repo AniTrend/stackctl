@@ -1487,9 +1487,8 @@ export function buildCli(): Command {
   cli.command("plan", "Produce a deterministic plan of what an operation would do.")
     .arguments("<operation:string>")
     .option("--profile <name:string>", "Use a specific profile.")
-    .option("--stacks <names:string>", "Comma-separated list of stack names.", {
-      complete: completeStackNames,
-    } as any)
+    .option("--stacks <names:string>", "Comma-separated list of stack names.")
+    .complete("stacks", completeStackNames)
     .option("--override <files:string>", "Comma-separated list of override files.")
     .option("--json", "Output machine-readable JSON.")
     .description(

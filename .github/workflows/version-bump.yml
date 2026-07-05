@@ -1,0 +1,47 @@
+name: Version Bump
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to set (e.g., 0.2.0 or v0.2.0)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  bump-version:
+    name: Bump version files
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Determine version
+        id: determine-version
+        run: |
+          if [[ -n "${{ github.event.inputs.version }}" ]]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bump version in deno.json and src/version.ts
+        id: bump
+        run: bash .github/scripts/bump-version.sh ${{ steps.determine-version.outputs.version }}
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add deno.json src/version.ts
+          git commit -m "chore(release): bump version to ${{ steps.bump.outputs.version }} [skip ci]"
+          git push

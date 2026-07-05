@@ -1,0 +1,88 @@
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+categories:
+  - title: '🚀 Features'
+    labels:
+      - ':star2: feature'
+  - title: '🛠️ Bug Fixes'
+    labels:
+      - ':adhesive_bandage: bug fix'
+  - title: '✨ Improvements'
+    labels:
+      - ':wrench: enhancement'
+  - title: '📚 Documentation'
+    labels:
+      - ':books: docs'
+  - title: '🧰 Maintenance'
+    labels:
+      - ':hammer_and_wrench: refactor'
+  - title: '📦 Dependencies'
+    labels:
+      - ':dagger: dependencies'
+  - title: '🧪 Testing'
+    labels:
+      - ':test_tube: testing'
+  - title: '🚧 CI/CD'
+    labels:
+      - ':construction_worker: ci'
+  - title: '⏪ Reverts'
+    labels:
+      - ':rewind: revert'
+autolabeler:
+  - label: ':star2: feature'
+    branch:
+      - '/feat\/.+/'
+  - label: ':adhesive_bandage: bug fix'
+    branch:
+      - '/fix\/.+/'
+  - label: ':wrench: enhancement'
+    branch:
+      - '/chore\/.+/'
+  - label: ':books: docs'
+    branch:
+      - '/docs\/.+/'
+  - label: ':hammer_and_wrench: refactor'
+    branch:
+      - '/refactor\/.+/'
+  - label: ':dagger: dependencies'
+    branch:
+      - '/build\/.+/'
+  - label: ':test_tube: testing'
+    branch:
+      - '/test\/.+/'
+  - label: ':construction_worker: ci'
+    branch:
+      - '/ci\/.+/'
+  - label: ':rewind: revert'
+    branch:
+      - '/revert\/.+/'
+  - label: ':books: docs'
+    files:
+      - '*.md'
+change-template: '- $TITLE by @$AUTHOR in #$NUMBER'
+change-title-escapes: '\<*_&'
+version-resolver:
+  major:
+    labels:
+      - ':cactus: breaking'
+  minor:
+    labels:
+      - ':star2: feature'
+      - ':wrench: enhancement'
+  patch:
+    labels:
+      - ':adhesive_bandage: bug fix'
+      - ':dagger: dependencies'
+      - ':hammer_and_wrench: refactor'
+      - ':test_tube: testing'
+      - ':construction_worker: ci'
+      - ':rewind: revert'
+  default: patch
+exclude-labels:
+  - ':skateboard: skip-changelog'
+template: |
+  # What's Changed
+
+  $CHANGES
+
+  **Full Changelog**: https://github.com/$OWNER/$REPOSITORY/compare/$PREVIOUS_TAG...v$RESOLVED_VERSION

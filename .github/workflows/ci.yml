@@ -33,14 +33,11 @@ jobs:
       - name: Type check
         run: deno task check
 
-      - name: Run tests
-        run: deno task test
+      - name: Run tests (with coverage)
+        run: deno task test:coverage
 
       - name: Generate coverage report
-        if: success()
-        run: |
-          deno test --allow-read --allow-write --allow-env --allow-run --allow-sys --coverage=.coverage
-          deno coverage --detailed .coverage
+        run: deno task coverage
 
   build:
     runs-on: ubuntu-latest

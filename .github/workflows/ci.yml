@@ -1,9 +1,3 @@
-/**
- * CI workflow for stackctl.
- *
- * Runs on every push and PR to main/dev branches.
- * Validates format, linting, type checking, tests, and coverage.
- */
 name: CI
 
 on:

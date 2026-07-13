@@ -4,7 +4,7 @@
 
 A Deno-powered CLI for managing local Docker Compose stacks across multi-service repositories, with config-driven profiles, overrides, secrets, and render pipelines.
 
-Status: **Early development** -- all 15 feature issues are planned and tracked on the [issue tracker](https://github.com/AniTrend/stackctl/issues).
+Status: **Active development** -- 14 of 15 commands implemented (see table below).
 
 ---
 
@@ -12,28 +12,29 @@ Status: **Early development** -- all 15 feature issues are planned and tracked o
 
 | Command | Status | Description |
 |---|---|---|
-| `stackctl init` | Planned | Generate commented `.stackctl` config |
-| `stackctl generate` | Planned | Generate `stacks/*.yml` from per-service sources |
-| `stackctl render` | Planned | Resolve `${VAR}` placeholders in stack files |
-| `stackctl overrides` | Planned | Profile and explicit override merging |
-| `stackctl up` | Planned | Deploy stacks to Docker Swarm |
-| `stackctl down` | Planned | Tear down stacks |
-| `stackctl status` | Planned | Show service status |
-| `stackctl logs` | Planned | Follow container logs |
-| `stackctl sync` | Planned | Sync images and volumes |
-| `stackctl doctor` | Planned | Validate environment |
-| `stackctl reload` | Planned | Re-render and reconcile without teardown |
-| `stackctl secrets` | Planned | Encrypt/decrypt/deploy/clean/check with SOPS+age |
-| `stackctl env` | Planned | Scaffold `.env` files from examples |
-| `stackctl plan` | Planned | Dry-run summary of all operations |
-| `stackctl completions` | Planned | Generate shell completions (bash/zsh/fish) |
+| `stackctl init` | Implemented | Generate commented `.stackctl` config |
+| `stackctl generate` | Implemented | Generate `stacks/*.yml` from per-service sources |
+| `stackctl render` | Implemented | Resolve `${VAR}` placeholders in stack files |
+| `stackctl up` | Implemented | Deploy stacks to Docker Swarm |
+| `stackctl down` | Implemented | Tear down stacks |
+| `stackctl status` | Implemented | Show service status |
+| `stackctl logs` | Implemented | Follow service logs |
+| `stackctl sync` | Implemented | Validate generated stacks match committed files (CI drift detection) |
+| `stackctl doctor` | Implemented | Check system and project health |
+| `stackctl reload` | Implemented | Re-render and reconcile without teardown |
+| `stackctl secrets` | Implemented | Encrypt/decrypt/deploy/clean/check with SOPS+age |
+| `stackctl env` | Implemented | Scaffold `.env` files from examples |
+| `stackctl plan` | Implemented | Dry-run summary of all operations |
+| `stackctl completions` | Implemented | Generate shell completions (bash/zsh/fish) |
+
+Override merging is integrated into `generate`, `render`, and `up` via the `--override` flag.
 
 ---
 
 ## Quick Start
 
 ```bash
-# Install (once released)
+# Install
 deno install -f --allow-run --allow-env --allow-read --allow-write \
   -n stackctl jsr:@anitrend/stackctl
 
@@ -46,6 +47,42 @@ stackctl generate
 # See what would happen
 stackctl plan
 ```
+
+---
+
+## Features
+
+- Config-driven profiles with layered overrides (`.stackctl`, `.stackctl.<profile>`, `.stackctl.local`)
+- SOPS + age encrypted secrets management
+- `${VAR}` render pipeline with service-local env resolution
+- Docker Swarm deploy with dry-run planning
+- CI drift detection via `sync` command
+- Shell completions (bash/zsh/fish)
+
+### Secrets Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `encrypt` | Encrypt `.env` files using SOPS + age |
+| `decrypt` | Decrypt `.env.enc` files back to plaintext |
+| `deploy` | Decrypt env files and deploy stacks |
+| `clean` | Remove decrypted `.env` files securely (shred + rm) |
+| `check` | Check secrets tooling availability (sops, age) |
+
+### Env Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `list` | List `.env` files with status (present/missing/outdated) |
+| `create` | Create `.env` from `.env.example` |
+| `diff` | Compare `.env` against `.env.example` |
+| `materialize` | Copy profile-specific env to `.env` |
+| `audit` | Check for plaintext `.env` files with encrypted counterparts |
+
+## GitHub Actions
+
+A composite action for installing stackctl in GitHub Actions is available at
+`.github/actions/setup-stackctl/`. See [docs/migration.md](docs/migration.md) for details.
 
 ---
 

@@ -86,11 +86,21 @@ jobs:
           draft: false
           prerelease: false
 
+      - name: Generate App token
+        id: app-token
+        if: vars.ENABLE_HOMEBREW_DISPATCH == 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: AniTrend
+          repositories: homebrew-tap
+
       - name: Dispatch homebrew-tap formula update
         if: vars.ENABLE_HOMEBREW_DISPATCH == 'true'
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           gh api \
             --method POST \

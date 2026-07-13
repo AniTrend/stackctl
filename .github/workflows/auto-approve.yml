@@ -18,6 +18,8 @@ jobs:
       pull-requests: write
     if: github.actor == 'renovate[bot]' || github.event_name == 'workflow_dispatch'
     steps:
+      # Pinned to v4: hmarr/auto-approve-action has no Node 24 release yet.
+      # Accept the Node 20 deprecation warning until upstream publishes a new version.
       - uses: hmarr/auto-approve-action@v4
         with:
           review-message: "Auto approved automated PR"

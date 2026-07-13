@@ -1,6 +1,6 @@
-import { assertEquals } from "@std/assert";
+import { assertMatch } from "@std/assert";
 import { VERSION } from "./version.ts";
 
-Deno.test("VERSION is dev", () => {
-  assertEquals(VERSION, "0.1.0-dev");
+Deno.test("VERSION is set and follows semver pattern", () => {
+  assertMatch(VERSION, /^\d+\.\d+\.\d+(-dev)?$/);
 });

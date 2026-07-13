@@ -97,14 +97,20 @@ jobs:
           repositories: homebrew-tap
 
       - name: Dispatch homebrew-tap formula update
+        id: dispatch-homebrew
         if: vars.ENABLE_HOMEBREW_DISPATCH == 'true'
-        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_VERSION: ${{ github.ref_name }}
         run: |
           gh api \
             --method POST \
-            -H "Accept: application/vnd.github+json" \
             /repos/AniTrend/homebrew-tap/dispatches \
-            -f event_type='stackctl-release' \
-            -f client_payload="{\"version\":\"${{ github.ref_name }}\"}"
+            --input - <<EOF
+          {
+            "event_type": "stackctl-release",
+            "client_payload": {
+              "version": "$RELEASE_VERSION"
+            }
+          }
+          EOF

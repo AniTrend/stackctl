@@ -1,5 +1,6 @@
 import { assertEquals } from "@std/assert";
 import { buildCli } from "../cli/mod.ts";
+import { VERSION } from "../version.ts";
 
 Deno.test("buildCli returns stackctl command", () => {
   const cmd = buildCli();
@@ -45,5 +46,5 @@ Deno.test("buildCli produces correct help output smoke test", () => {
 
 Deno.test("buildCli version is set", () => {
   const cmd = buildCli();
-  assertEquals(cmd.getVersion(), "0.1.0-dev");
+  assertEquals(cmd.getVersion(), VERSION);
 });

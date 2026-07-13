@@ -22,14 +22,14 @@ jobs:
             os: macos-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
       
       - name: Cache Deno dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cache/deno
@@ -50,7 +50,7 @@ jobs:
         working-directory: dist
         run: shasum -a 256 "stackctl-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" > "stackctl-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256"
       
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.target }}
           path: |
@@ -64,9 +64,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: "*"
           path: dist/
@@ -77,7 +77,7 @@ jobs:
         run: shasum -a 256 stackctl-*.tar.gz > checksums.txt
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/stackctl-*.tar.gz

@@ -1,6 +1,6 @@
 {
   "name": "@anitrend/stackctl",
-  "version": "0.1.0-dev",
+  "version": "0.0.1",
   "exports": "./src/main.ts",
   "tasks": {
     "cache": "deno cache src/main.ts",
@@ -28,14 +28,22 @@
     "@std/fmt": "jsr:@std/fmt@^1.0.5"
   },
   "lint": {
-    "include": ["src/"],
+    "include": [
+      "src/"
+    ],
     "rules": {
-      "tags": ["recommended"],
-      "exclude": ["no-unused-vars"]
+      "tags": [
+        "recommended"
+      ],
+      "exclude": [
+        "no-unused-vars"
+      ]
     }
   },
   "fmt": {
-    "include": ["src/"],
+    "include": [
+      "src/"
+    ],
     "useTabs": false,
     "lineWidth": 100,
     "indentWidth": 2,

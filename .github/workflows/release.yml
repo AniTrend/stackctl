@@ -76,9 +76,6 @@ jobs:
         working-directory: dist
         run: shasum -a 256 stackctl-*.tar.gz > checksums.txt
 
-      # NOTE: Homebrew tap auto-update is a follow-up task.
-      # The release workflow currently does not trigger a Homebrew tap PR.
-
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -88,3 +85,16 @@ jobs:
           generate_release_notes: false
           draft: false
           prerelease: false
+
+      - name: Dispatch homebrew-tap formula update
+        if: vars.ENABLE_HOMEBREW_DISPATCH == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN }}
+        run: |
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            /repos/AniTrend/homebrew-tap/dispatches \
+            -f event_type='stackctl-release' \
+            -f client_payload="{\"version\":\"${{ github.ref_name }}\"}"

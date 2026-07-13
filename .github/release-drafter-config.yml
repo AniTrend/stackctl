@@ -4,30 +4,39 @@ categories:
   - title: '🚀 Features'
     labels:
       - ':star2: feature'
+    collapse-after: 5
   - title: '🛠️ Bug Fixes'
     labels:
       - ':adhesive_bandage: bug fix'
+    collapse-after: 5
   - title: '✨ Improvements'
     labels:
       - ':wrench: enhancement'
+    collapse-after: 5
   - title: '📚 Documentation'
     labels:
       - ':books: docs'
+    collapse-after: 5
   - title: '🧰 Maintenance'
     labels:
       - ':hammer_and_wrench: refactor'
+    collapse-after: 5
   - title: '📦 Dependencies'
     labels:
       - ':dagger: dependencies'
+    collapse-after: 5
   - title: '🧪 Testing'
     labels:
       - ':test_tube: testing'
+    collapse-after: 5
   - title: '🚧 CI/CD'
     labels:
       - ':construction_worker: ci'
+    collapse-after: 5
   - title: '⏪ Reverts'
     labels:
       - ':rewind: revert'
+    collapse-after: 5
 autolabeler:
   - label: ':star2: feature'
     branch:
@@ -47,6 +56,7 @@ autolabeler:
   - label: ':dagger: dependencies'
     branch:
       - '/build\/.+/'
+      - '/dependencies\/.+/'
   - label: ':test_tube: testing'
     branch:
       - '/test\/.+/'
@@ -58,7 +68,7 @@ autolabeler:
       - '/revert\/.+/'
   - label: ':books: docs'
     files:
-      - '*.md'
+      - '**/*.md'
 change-template: '- $TITLE by @$AUTHOR in #$NUMBER'
 change-title-escapes: '\<*_&'
 version-resolver:

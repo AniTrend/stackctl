@@ -1,23 +1,21 @@
-name: Release Drafter
+name: Release Drafter Autolabeler
 
 on:
-  push:
-    branches:
-      - main
+  pull_request_target:
+    types: [opened, reopened, synchronize]
 
 permissions:
   contents: read
 
 jobs:
-  update-release-draft:
+  autolabel-pr:
     permissions:
-      contents: write
+      contents: read
       pull-requests: write
     runs-on: ubuntu-latest
     steps:
-      - uses: release-drafter/release-drafter@v7
+      - uses: release-drafter/release-drafter/autolabeler@v7
         with:
           config-name: release-drafter-config.yml
-          publish: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

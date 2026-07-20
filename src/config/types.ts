@@ -30,8 +30,6 @@ export interface StackConfig {
   directory: string;
   /** Generated stack names. */
   names: string[];
-  /** Compose discovery metadata key (default: "x-stack"). */
-  composeStackKey?: string;
   /** Directories to skip during discovery. */
   skipDirectories?: string[];
   /** External network name for all stacks. */

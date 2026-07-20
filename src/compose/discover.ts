@@ -4,6 +4,7 @@
  */
 import { walk } from "@std/fs/walk";
 import { parse as parseYaml } from "@std/yaml";
+import { normalizeStackName } from "./load.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -80,10 +81,20 @@ export async function discoverComposeFiles(
       const parsed = parseYaml(raw) as Record<string, unknown> | null;
       if (!parsed || typeof parsed !== "object") continue;
 
-      const stackName = parsed["x-stack"];
-      if (typeof stackName !== "string" || stackName.trim() === "") continue;
+      const rawStack = parsed["x-stack"];
+      if (rawStack === undefined || rawStack === null) continue;
 
-      const nameStr = stackName.trim();
+      let nameStr: string;
+      try {
+        nameStr = normalizeStackName(rawStack);
+      } catch (err: unknown) {
+        errors.push({
+          path: entry.path,
+          message: `Invalid x-stack metadata: ${err instanceof Error ? err.message : String(err)}`,
+        });
+        continue;
+      }
+
       if (!stacks[nameStr]) stacks[nameStr] = [];
       stacks[nameStr].push(entry.path);
     } catch (err: unknown) {

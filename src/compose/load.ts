@@ -14,8 +14,52 @@ import { resolve } from "@std/path";
 export interface LoadResult {
   /** Parsed compose data with `x-stack` key removed. */
   data: Record<string, unknown>;
-  /** Value of the `x-stack` key (the stack name). */
+  /** Normalized stack name extracted from the `x-stack` key. */
   stackName: string;
+}
+
+// ---------------------------------------------------------------------------
+// x-stack normalizer
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize the `x-stack` compose metadata field to a stack name string.
+ *
+ * Supports two forms:
+ *   - legacy scalar:   `x-stack: infra`
+ *   - object (v1):     `x-stack: { name: infra }`
+ *
+ * Throws on invalid values, unknown object fields, or missing/empty names.
+ */
+export function normalizeStackName(value: unknown): string {
+  // Legacy scalar form
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed === "") {
+      throw new Error("x-stack value must be a non-empty string");
+    }
+    return trimmed;
+  }
+
+  // Object form: must be a plain record
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    const obj = value as Record<string, unknown>;
+    const knownKeys = new Set(["name"]);
+
+    for (const key of Object.keys(obj)) {
+      if (!knownKeys.has(key)) {
+        throw new Error(`Unknown field in x-stack object: "${key}"`);
+      }
+    }
+
+    const name = obj["name"];
+    if (typeof name !== "string" || name.trim() === "") {
+      throw new Error('x-stack object must have a non-empty "name" field');
+    }
+    return name.trim();
+  }
+
+  throw new Error("x-stack must be a string or {name: string} object");
 }
 
 // ---------------------------------------------------------------------------
@@ -25,7 +69,7 @@ export interface LoadResult {
 /**
  * Load a docker-compose YAML file and extract its `x-stack` value.
  *
- * Throws if the file cannot be parsed or if `x-stack` is missing / non-string.
+ * Throws if the file cannot be parsed or if `x-stack` is missing / invalid.
  */
 export async function loadCompose(path: string): Promise<LoadResult> {
   const raw = await Deno.readTextFile(path);
@@ -38,14 +82,25 @@ export async function loadCompose(path: string): Promise<LoadResult> {
     );
   }
 
-  const stackName = parsed["x-stack"];
-  if (typeof stackName !== "string" || stackName.trim() === "") {
+  const rawStack = parsed["x-stack"];
+  if (rawStack === undefined || rawStack === null) {
     throw new Error(`Compose file ${path} is missing a valid "x-stack" key`);
+  }
+
+  let stackName: string;
+  try {
+    stackName = normalizeStackName(rawStack);
+  } catch (err: unknown) {
+    throw new Error(
+      `Compose file ${path} has invalid "x-stack": ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
   }
 
   // Return a copy with x-stack removed
   const { "x-stack": _, ...data } = parsed;
-  return { data, stackName: stackName.trim() };
+  return { data, stackName };
 }
 
 /**

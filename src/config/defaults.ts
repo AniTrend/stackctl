@@ -12,7 +12,6 @@ export const DEFAULT_CONFIG: StackctlConfig = {
     directory: "stacks",
     names: [],
     network: "",
-    composeStackKey: "x-stack",
     skipDirectories: [],
     networkDriver: "overlay",
   },

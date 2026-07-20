@@ -78,7 +78,7 @@ Create a `.stackctl` file (generated via `stackctl init`):
 project: myproject
 
 stack:
-  # Service directories containing compose files with x-stack labels
+  # Root directory for service compose files (each must declare x-stack metadata)
   directory: ./stack
   # Stack names to manage (empty = all discovered)
   names: []
@@ -245,6 +245,57 @@ stackctl up --override ./overrides/production.yml --override ./overrides/region-
 
 Override files are applied _after_ profile merging but _before_ render.
 
+## Compose Metadata (`x-stack`)
+
+`stackctl` uses the `x-stack` compose metadata key to group docker-compose files into
+named stacks during discovery and generation. Every compose file must declare which
+stack it belongs to.
+
+### Supported Forms
+
+Two forms are supported:
+
+**Scalar (legacy)** -- a plain stack name:
+
+```yaml
+services:
+  api:
+    image: myapp/api
+x-stack: api
+```
+
+**Object (v1)** -- a map with a `name` field:
+
+```yaml
+services:
+  api:
+    image: myapp/api
+x-stack:
+  name: api
+```
+
+Both forms are equivalent and normalize to the same stack name. Scalar and object
+forms can coexist within the same stack group; they are merged by normalized name.
+
+### Object Form Constraints
+
+The object form currently accepts the `name` field **only**. Adding unknown fields
+will cause an error:
+
+```yaml
+# Invalid -- "labels" is not a recognized field
+x-stack:
+  name: api
+  labels: [production]
+```
+
+During discovery, files with invalid `x-stack` metadata are skipped for grouping
+and reported as errors. During explicit loading (e.g. `stackctl generate`), invalid
+metadata causes the command to fail with a descriptive message.
+
+The `x-stack` key is **source-only metadata**. It is stripped from generated and
+rendered stack output and never appears in deployed compose files.
+
 ## Rollback
 
 ### Rollback a Deployment
@@ -313,15 +364,19 @@ docker swarm init
 ✗ Stack "myapp" not found in /path/to/project
 ```
 
-Check that compose files have the `x-stack` label and are in the configured `stack.directory`:
+Check that your compose files declare `x-stack` metadata and are located within the
+configured `stack.directory`. See [Compose Metadata (`x-stack`)](#compose-metadata-x-stack)
+for supported forms.
 
 ```yaml
-# docker-compose.yml
+# docker-compose.yml -- either form works:
 services:
   api:
     image: myapp/api
-x-stack:
-  name: myapp
+x-stack: myapp              # scalar form
+# or:
+# x-stack:
+#   name: myapp             # object form
 ```
 
 ### Config Validation Errors

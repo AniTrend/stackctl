@@ -99,8 +99,28 @@ See `CONTRIBUTING.md` for full details. Quick reference:
 - **Branch**: `<type>/<issue-number>-<short-description>` (e.g., `feat/1208-implement-override-merging`)
 - **Commit**: `<type>(<scope>): <summary>` (e.g., `feat(config): add profile overlay discovery`)
 - **PR title**: same format as commits, linked to the relevant issue
-- **Valid types**: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `build`, `ci`, `revert`
+- **Valid types**: `feat`, `fix`, `dependencies`, `chore`, `docs`, `refactor`, `test`, `build`, `ci`, `revert`
 - **Valid scopes**: `config`, `generate`, `render`, `cli`, `docker`, `secrets`, `project`, `env`, `compose`, `process`
+
+### Branch prefix selection for agents
+
+When creating a branch automatically, select the prefix based on the change intent.
+The release drafter autolabeler maps each branch prefix to a changelog label:
+
+| What you are doing | Branch prefix | Auto-label applied |
+|---|---|---|
+| Adding a new feature or capability | `feat` | `:star2: feature` |
+| Fixing a bug | `fix` | `:adhesive_bandage: bug fix` |
+| Updating dependencies (Renovate, manual) | `dependencies` | `:dagger: dependencies` |
+| Changing build system or tooling | `build` | `:dagger: dependencies` |
+| Routine maintenance, chores | `chore` | `:wrench: enhancement` |
+| Documentation only | `docs` | `:books: docs` |
+| Refactoring without behavior change | `refactor` | `:hammer_and_wrench: refactor` |
+| Adding or fixing tests | `test` | `:test_tube: testing` |
+| CI/CD configuration | `ci` | `:construction_worker: ci` |
+| Reverting a previous change | `revert` | `:rewind: revert` |
+
+If no issue number exists, use `<type>/<short-description>` and link to an issue once created.
 
 ## Documentation requirements
 

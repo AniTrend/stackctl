@@ -37,6 +37,11 @@ categories:
     labels:
       - ':rewind: revert'
     collapse-after: 5
+# ── Autolabeler ───────────────────────────────────────────────
+# When a PR is opened from a branch matching the regex below,
+# Release Drafter auto-applies the corresponding label.
+# This ensures branch naming drives changelog categorization.
+# Keep these in sync with CONTRIBUTING.md branch types.
 autolabeler:
   - label: ':star2: feature'
     branch:

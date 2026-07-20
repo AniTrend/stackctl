@@ -39,7 +39,8 @@ Supported types:
 - `docs` -- Documentation only changes
 - `refactor` -- Code change that neither fixes a bug nor adds a feature
 - `test` -- Adding missing or correcting existing tests
-- `build` -- Changes that affect the build system or dependencies
+- `build` -- Changes that affect the build system or tooling
+- `dependencies` -- Updating external dependencies (distinct from build-system changes)
 - `ci` -- Changes to CI configuration or automation scripts
 - `revert` -- Reverting a previous commit
 

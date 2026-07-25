@@ -13,12 +13,17 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: version-bump-pr
+  cancel-in-progress: false
+
 jobs:
   bump-version:
     name: Bump version files
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -36,12 +41,21 @@ jobs:
 
       - name: Bump version in deno.json and src/version.ts
         id: bump
-        run: bash .github/scripts/bump-version.sh ${{ steps.determine-version.outputs.version }}
+        env:
+          VERSION: ${{ steps.determine-version.outputs.version }}
+        run: bash .github/scripts/bump-version.sh "$VERSION"
 
-      - name: Commit version bump
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add deno.json src/version.ts
-          git commit -m "chore(release): bump version to ${{ steps.bump.outputs.version }} [skip ci]"
-          git push
+      - name: Create version bump pull request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          base: main
+          branch: chore/version-bump
+          add-paths: |
+            deno.json
+            src/version.ts
+          commit-message: "chore(release): bump version to ${{ steps.bump.outputs.version }}"
+          title: "chore(release): bump version to ${{ steps.bump.outputs.version }}"
+          body: |
+            Generated after release publication to update version metadata.
+          delete-branch: true
+          sign-commits: true

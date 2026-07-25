@@ -132,3 +132,15 @@ If no issue number exists, use `<type>/<short-description>` and link to an issue
 - This project is in **early development**. All commands are listed as "Planned" in `README.md`; check actual implementation status in `src/cli/mod.ts` before assuming a command exists.
 - Permissions for the compiled binary are defined in `src/main.ts` shebang and the CI build step. Do not change permissions without updating both.
 - Git-ignored files: `.stackctl.local`, `.stackctl.local.*`, `*.env` (except `.env.example`), `*.env.enc`, `age-key.txt`, `age.key`, `dist/`, `.rendered/`, `.coverage/`, `cov/`.
+
+## Repository Map
+
+A full codemap is available at `codemap.md` in the project root.
+
+Before working on any task, read `codemap.md` to understand:
+
+- Project architecture and entry points
+- Directory responsibilities and design patterns
+- Data flow and integration points between modules
+
+For deep work on a specific folder, also read that folder's `codemap.md`.

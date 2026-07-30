@@ -1,6 +1,6 @@
 ---
 name: stackctl-cli
-description: Use this skill when helping agents answer stackctl CLI usage questions, choose source-valid stackctl commands, or avoid stale documented examples.
+description: Use this skill when a task involves the stackctl CLI, including managing Docker Swarm stacks, choosing source-valid commands, running operational workflows, answering usage questions, or avoiding stale documented examples.
 ---
 
 # stackctl CLI
@@ -37,5 +37,28 @@ command behavior, flags, examples, or agent-facing guidance.
 - Env files: `env list`, `create`, `diff`, `materialize`, `audit`.
 - Shell integration: `completions`.
 
-For full command facts, read `references/commands.md`. For source hierarchy, runtime facts, and
-known stale docs, read `references/truth-model.md`.
+## Operational model
+
+stackctl manages Docker Swarm stacks through a four-stage pipeline: discover Compose files, generate
+canonical stack YAML, render `${VAR}` placeholders, and deploy via `docker stack deploy`. Different
+commands run different stages:
+
+- `up` runs all four stages in memory and deploys from a temp file.
+- `reload` runs all four stages, writes to disk, and deploys without teardown.
+- `generate` and `render` run early stages without deploying.
+- `sync` validates drift by comparing in-memory generation to committed files.
+- `plan <operation>` previews any operation without executing.
+
+## Task playbooks
+
+For task-oriented workflows (deploy, update, drift check, teardown, secrets, env scaffolding,
+diagnostics, previewing), read `references/playbooks.md`. It provides command chains, prerequisites,
+output interpretation, exit code guidance, and a decision tree mapping agent intents to commands.
+
+## References
+
+- `references/commands.md`: Full command, subcommand, option, argument, and caveat reference tables.
+- `references/playbooks.md`: Task-oriented operational workflows, decision tree, and exit code
+  interpretation.
+- `references/truth-model.md`: Source hierarchy, runtime facts, config resolution, exit codes, and
+  anti-hallucination controls.

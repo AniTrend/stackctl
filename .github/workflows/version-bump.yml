@@ -1,8 +1,12 @@
 name: Version Bump
 
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: ["Release Drafter"]
+    types:
+      - completed
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       version:
@@ -21,6 +25,7 @@ jobs:
   bump-version:
     name: Bump version files
     runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
       pull-requests: write
@@ -32,12 +37,21 @@ jobs:
 
       - name: Determine version
         id: determine-version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISPATCH_VERSION: ${{ github.event.inputs.version }}
         run: |
-          if [[ -n "${{ github.event.inputs.version }}" ]]; then
-            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "$DISPATCH_VERSION" ]]; then
+            version="$DISPATCH_VERSION"
           else
-            echo "version=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+            version="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+              --jq '[.[] | select(.draft == true)] | .[0].tag_name // empty')"
+            if [[ -z "$version" ]]; then
+              echo "::error::No draft release found. Create a draft release (e.g. via Release Drafter) or dispatch with a version input."
+              exit 1
+            fi
           fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Bump version in deno.json and src/version.ts
         id: bump
@@ -46,6 +60,7 @@ jobs:
         run: bash .github/scripts/bump-version.sh "$VERSION"
 
       - name: Create version bump pull request
+        id: cpr
         uses: peter-evans/create-pull-request@v7
         with:
           base: main
@@ -56,6 +71,13 @@ jobs:
           commit-message: "chore(release): bump version to ${{ steps.bump.outputs.version }}"
           title: "chore(release): bump version to ${{ steps.bump.outputs.version }}"
           body: |
-            Generated after release publication to update version metadata.
+            Generated after Release Drafter completed to update version metadata.
           delete-branch: true
           sign-commits: true
+
+      - name: Enable auto-merge
+        id: enable-auto-merge
+        if: steps.cpr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr merge --auto --squash "${{ steps.cpr.outputs.pull-request-number }}"

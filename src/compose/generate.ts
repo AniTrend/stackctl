@@ -148,10 +148,27 @@ async function generateSingleStack(
     }),
   );
 
-  // 2. Merge: compose data + fragment per-source, then merge all into one
+  // 2. Merge: combine data + fragment per-source, normalize paths against the
+  //    source's own composeDir, then merge all sources together.
+  //
+  //    Path provenance policy: `env_file` and relative bind-mount paths are
+  //    resolved against the directory of the compose file that declared them
+  //    (the same rule Docker Compose applies), BEFORE any cross-source merge.
+  //    This prevents one source's paths leaking into another source's
+  //    services. Absolute paths and named volumes are preserved as-is.
+  //    Generated output is always repo-root-relative for surviving paths.
   let merged: ComposeData = {};
   for (const src of sources) {
-    const combined = composeDeepMerge(src.data, src.fragment);
+    let combined = composeDeepMerge(src.data, src.fragment);
+    if (combined.services) {
+      const normalized: Record<string, ServiceDef> = {};
+      for (const [svcName, svc] of Object.entries(combined.services)) {
+        let t = rewriteEnvFile(svc, src.composeDir, repoRoot);
+        t = rewriteBindMountPaths(t, src.composeDir, repoRoot);
+        normalized[svcName] = t;
+      }
+      combined = { ...combined, services: normalized };
+    }
     merged = composeDeepMerge(merged, combined);
   }
 
@@ -160,14 +177,18 @@ async function generateSingleStack(
     merged = await applyOverrides(merged, overrides, repoRoot);
   }
 
-  // 3. Transform services
+  // 3. Transform services.
+  //    Source paths were already normalized in step 2; re-running the path
+  //    rewrites against repoRoot is idempotent for them and normalizes any
+  //    relative paths introduced by overrides deterministically relative to
+  //    repoRoot (absolute paths and named volumes remain untouched).
   if (merged.services) {
     const transformed: Record<string, ServiceDef> = {};
     for (const [svcName, svc] of Object.entries(merged.services)) {
       let t = stripComposeOnlyKeys(svc);
       t = applyLoggingDefaults(t);
-      t = rewriteEnvFile(t, sources[0]?.composeDir ?? "", repoRoot);
-      t = rewriteBindMountPaths(t, sources[0]?.composeDir ?? "", repoRoot);
+      t = rewriteEnvFile(t, repoRoot, repoRoot);
+      t = rewriteBindMountPaths(t, repoRoot, repoRoot);
       transformed[svcName] = t;
     }
     merged = { ...merged, services: transformed };

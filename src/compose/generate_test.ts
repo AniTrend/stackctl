@@ -2,8 +2,11 @@
  * Tests for the full stack generation pipeline.
  */
 import { assertEquals, assertStringIncludes } from "@std/assert";
+import { parse as parseYaml } from "@std/yaml";
 import { generateStacks } from "./generate.ts";
 import type { GenerateOptions } from "./generate.ts";
+import type { ComposeData, ServiceDef } from "./types.ts";
+import { renderStack } from "../render/mod.ts";
 
 async function makeTempDir(): Promise<string> {
   return await Deno.makeTempDir({ prefix: "stackctl-test-generate-" });
@@ -251,6 +254,278 @@ Deno.test("generateStacks: services stripped of compose-only keys", async () => 
   // deploy and image must stay
   assertStringIncludes(content, "deploy:");
   assertStringIncludes(content, "image: alpine");
+
+  await Deno.remove(tmp, { recursive: true });
+});
+
+// ---------------------------------------------------------------------------
+// Path provenance (env_file / bind mounts) across multiple sources
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a stack ("platform") with two source directories, each declaring
+ * distinct services with their own env files and volume mounts.
+ *
+ * - services/web:  short-form relative bind mount, named volume, absolute
+ *                  mount, and a fragment that adds a `worker` service.
+ * - services/api:  long-form bind mount, long-form named volume, absolute
+ *                  short-form mount.
+ */
+async function createTwoServiceFixture(repoRoot: string) {
+  const webDir = `${repoRoot}/services/web`;
+  await Deno.mkdir(webDir, { recursive: true });
+
+  await writeFile(
+    webDir,
+    "docker-compose.yml",
+    [
+      "x-stack: platform",
+      "",
+      "services:",
+      "  web:",
+      "    image: nginx:alpine",
+      "    env_file:",
+      '      - ".env"',
+      "    labels:",
+      '      app: "${SERVICE}-frontend"',
+      "    volumes:",
+      '      - "./html:/usr/share/nginx/html"',
+      '      - "app-data:/var/lib/data"',
+      '      - "/etc/ssl:/ssl:ro"',
+      "",
+      "volumes:",
+      "  app-data:",
+      "",
+    ].join("\n"),
+  );
+  await writeFile(webDir, ".env", "SERVICE=web\n");
+  await writeFile(
+    webDir,
+    "swarm.fragment.yml",
+    [
+      "services:",
+      "  worker:",
+      "    image: busybox",
+      "    volumes:",
+      '      - "./frag:/frag"',
+      "",
+    ].join("\n"),
+  );
+
+  const apiDir = `${repoRoot}/services/api`;
+  await Deno.mkdir(apiDir, { recursive: true });
+
+  await writeFile(
+    apiDir,
+    "docker-compose.yml",
+    [
+      "x-stack: platform",
+      "",
+      "services:",
+      "  api:",
+      "    image: node:20",
+      "    env_file:",
+      '      - ".env"',
+      "    labels:",
+      '      app: "${SERVICE}-backend"',
+      "    volumes:",
+      "      - type: bind",
+      '        source: "./static"',
+      '        target: "/srv/static"',
+      "      - type: volume",
+      '        source: "api-data"',
+      '        target: "/data"',
+      '      - "/etc/hosts:/etc/hosts"',
+      "",
+      "volumes:",
+      "  api-data:",
+      "",
+    ].join("\n"),
+  );
+  await writeFile(apiDir, ".env", "SERVICE=api\n");
+}
+
+function parseGenerated(content: string): ComposeData {
+  return parseYaml(content) as ComposeData;
+}
+
+Deno.test("generateStacks: env_file paths keep their own source composeDir", async () => {
+  const tmp = await makeTempDir();
+  await createTwoServiceFixture(tmp);
+
+  const result = await generateStacks({ stacks: ["platform"], repoRoot: tmp, dryRun: true });
+  assertEquals(result.errors, []);
+
+  const parsed = parseGenerated(result.generated["platform"]);
+  const web = parsed.services!["web"];
+  const api = parsed.services!["api"];
+
+  // Each service's env_file resolves against ITS OWN dir, never sources[0]
+  assertEquals(web.env_file, ["./services/web/.env"]);
+  assertEquals(api.env_file, ["./services/api/.env"]);
+
+  // Worker comes from web's fragment — also normalized against web's dir
+  assertEquals(parsed.services!["worker"].volumes, ["./services/web/frag:/frag"]);
+
+  await Deno.remove(tmp, { recursive: true });
+});
+
+Deno.test("generateStacks: bind mounts keep their own source composeDir", async () => {
+  const tmp = await makeTempDir();
+  await createTwoServiceFixture(tmp);
+
+  const result = await generateStacks({ stacks: ["platform"], repoRoot: tmp, dryRun: true });
+  assertEquals(result.errors, []);
+
+  const parsed = parseGenerated(result.generated["platform"]);
+  const web = parsed.services!["web"];
+  const api = parsed.services!["api"];
+
+  // Short-form relative bind mount → own dir
+  assertEquals(web.volumes?.[0], "./services/web/html:/usr/share/nginx/html");
+  // Named volume preserved
+  assertEquals(web.volumes?.[1], "app-data:/var/lib/data");
+  // Absolute mount preserved
+  assertEquals(web.volumes?.[2], "/etc/ssl:/ssl:ro");
+
+  // Long-form bind mount → own dir
+  assertEquals(api.volumes?.[0], {
+    type: "bind",
+    source: "./services/api/static",
+    target: "/srv/static",
+  });
+  // Long-form named volume preserved
+  assertEquals(api.volumes?.[1], { type: "volume", source: "api-data", target: "/data" });
+  // Absolute short-form mount preserved
+  assertEquals(api.volumes?.[2], "/etc/hosts:/etc/hosts");
+
+  await Deno.remove(tmp, { recursive: true });
+});
+
+Deno.test("generateStacks: same service across sources normalized per-source before merge", async () => {
+  const tmp = await makeTempDir();
+  const webDir = `${tmp}/services/web`;
+  const apiDir = `${tmp}/services/api`;
+  await Deno.mkdir(webDir, { recursive: true });
+  await Deno.mkdir(apiDir, { recursive: true });
+
+  // Both sources declare a "web" service. Each field must be normalized
+  // against the directory that declared it BEFORE the cross-source merge.
+  await writeFile(
+    webDir,
+    "docker-compose.yml",
+    [
+      "x-stack: platform",
+      "services:",
+      "  web:",
+      "    image: nginx:alpine",
+      "    env_file:",
+      '      - ".env"',
+      "",
+    ].join("\n"),
+  );
+  await writeFile(
+    apiDir,
+    "docker-compose.yml",
+    [
+      "x-stack: platform",
+      "services:",
+      "  web:",
+      "    image: nginx:alpine",
+      "    volumes:",
+      '      - "./html:/usr/share/nginx/html"',
+      "",
+    ].join("\n"),
+  );
+
+  const result = await generateStacks({ stacks: ["platform"], repoRoot: tmp, dryRun: true });
+  assertEquals(result.errors, []);
+
+  const parsed = parseGenerated(result.generated["platform"]);
+  const web = parsed.services!["web"] as ServiceDef;
+
+  // env_file declared in web's dir → normalized against web's dir
+  assertEquals(web.env_file, ["./services/web/.env"]);
+  // bind mount declared in api's dir → normalized against api's dir, NOT sources[0]
+  assertEquals(web.volumes, ["./services/api/html:/usr/share/nginx/html"]);
+
+  await Deno.remove(tmp, { recursive: true });
+});
+
+Deno.test("generateStacks: override-introduced relative paths normalize against repoRoot", async () => {
+  const tmp = await makeTempDir();
+  await createTwoServiceFixture(tmp);
+
+  const overridesDir = `${tmp}/overrides`;
+  await Deno.mkdir(overridesDir, { recursive: true });
+  await writeFile(
+    overridesDir,
+    "prod.yml",
+    [
+      "services:",
+      "  web:",
+      "    env_file:",
+      '      - "prod.env"',
+      "    volumes:",
+      '      - "./overrides/data:/data"',
+      '      - "/opt/override:/opt"',
+      '      - "extra-vol:/extra"',
+      "",
+    ].join("\n"),
+  );
+
+  const result = await generateStacks({
+    stacks: ["platform"],
+    repoRoot: tmp,
+    dryRun: true,
+    overrides: ["overrides/prod.yml"],
+  });
+  assertEquals(result.errors, []);
+
+  const parsed = parseGenerated(result.generated["platform"]);
+  const web = parsed.services!["web"] as ServiceDef;
+
+  // env_file arrays APPEND per Docker override semantics: the source entry
+  // keeps its own provenance, the override entry is repo-root-relative.
+  assertEquals(web.env_file, ["./services/web/.env", "./prod.env"]);
+  // volumes APPEND: source mounts unchanged, override relative bind mount is
+  // repo-root-relative, absolute paths and named volumes preserved.
+  assertEquals(web.volumes, [
+    "./services/web/html:/usr/share/nginx/html",
+    "app-data:/var/lib/data",
+    "/etc/ssl:/ssl:ro",
+    "./overrides/data:/data",
+    "/opt/override:/opt",
+    "extra-vol:/extra",
+  ]);
+
+  await Deno.remove(tmp, { recursive: true });
+});
+
+Deno.test("generateStacks + render: each service reads its own env file", async () => {
+  const tmp = await makeTempDir();
+  await createTwoServiceFixture(tmp);
+
+  const result = await generateStacks({ stacks: ["platform"], repoRoot: tmp, dryRun: true });
+  assertEquals(result.errors, []);
+
+  // Render the generated stack exactly like the CLI does (projectDir = repoRoot)
+  const rendered = await renderStack({
+    data: parseGenerated(result.generated["platform"]),
+    projectDir: tmp,
+    repoRoot: tmp,
+  });
+
+  // The ${SERVICE} placeholder in each service's labels is substituted from
+  // the rendered data — if a service read the wrong env file, its label
+  // would contain the other service's value.
+  const web = rendered.data.services!["web"];
+  const api = rendered.data.services!["api"];
+  assertEquals(web.labels, { app: "web-frontend" });
+  assertEquals(api.labels, { app: "api-backend" });
+  // env_file is absolutized to each service's own file by rendering
+  assertEquals(web.env_file, [`${tmp}/services/web/.env`]);
+  assertEquals(api.env_file, [`${tmp}/services/api/.env`]);
 
   await Deno.remove(tmp, { recursive: true });
 });

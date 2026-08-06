@@ -146,6 +146,7 @@ export async function reloadStacks(options: ReloadOptions): Promise<ReloadResult
       outputDir: stacksDir,
       dryRun: false, // write to stacks/ so render can read them
       overrides: allOverrides.length > 0 ? allOverrides : undefined,
+      skipDirs: config.base.stack.skipDirectories,
     });
 
     // Report generation errors

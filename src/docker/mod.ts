@@ -35,6 +35,14 @@ export function dockerServiceUpdate(
   return runner.run(cmd);
 }
 
+export function dockerServiceScale(
+  runner: ProcessRunner,
+  serviceName: string,
+  replicas = 0,
+): Promise<ProcessResult> {
+  return runner.run(["docker", "service", "scale", `${serviceName}=${replicas}`]);
+}
+
 export function dockerStackDeploy(
   runner: ProcessRunner,
   stackName: string,

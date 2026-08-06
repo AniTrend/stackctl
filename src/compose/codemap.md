@@ -57,7 +57,11 @@ Discovery and loading:
 1. `discoverComposeFiles` walks `DiscoverOptions.repoRoot` with `@std/fs/walk`, includes files only,
    skips hidden directories, and filters names to `docker-compose.yml` or `docker-compose.yaml`.
 2. `DEFAULT_SKIP_DIRS` excludes `node_modules`, `stacks`, `tools`, `environments`, and
-   `__pycache__`; `DiscoverOptions.skipDirs` extends that set.
+   `__pycache__`; `DiscoverOptions.skipDirs` extends that set. Config-aware callers pass
+   `config.base.stack.skipDirectories` as `skipDirs` so project-level ignores apply to every
+   discovery path (CLI `up`/`down`/`status`/`logs`/`health`/completions, `sync`, `plan`, and the
+   secrets deploy pipeline). `GenerateOptions.skipDirs` forwards the same list into discovery during
+   generation (`generate`/`render`/`up`/`reload`/`sync`/`plan`/`secrets deploy`).
 3. Each candidate YAML file is parsed with `@std/yaml.parse`. Files without `x-stack` are ignored.
    Invalid YAML or invalid stack metadata are recorded in `DiscoverResult.errors`.
 4. `normalizeStackName` converts the `x-stack` value to the grouping key, producing

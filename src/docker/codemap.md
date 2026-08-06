@@ -14,6 +14,16 @@ The module is responsible for:
   output.
 - Streaming service logs through `docker service logs`.
 - Updating a Swarm service through `docker service update`.
+- Scaling a Swarm service through `docker service scale <name>=<replicas>`.
+- Shutting a Swarm service down through `shutdownService` in `service.ts`, which scales an exact
+  full service name to zero replicas and returns a structured result (`scaled`, `would-scale`,
+  `invalid`, or `error` with a `missing` flag for unknown services).
+- Evaluating deployed stack health through `checkStackHealth` in `health.ts`, which derives
+  unhealthy services from replica count mismatches (the `Replicas` "running/desired" field,
+  unhealthy on any mismatch including running above desired) and failed or rejected task
+  `CurrentState` values. Evaluation fails closed: malformed service/task JSON lines and unparseable
+  `Replicas` values are recorded as errors and mark the affected stack and overall result unhealthy.
+  This evaluation is read-only and command-driven; it never mutates Swarm state.
 - Reading Docker daemon information with `docker info`.
 - Deriving Swarm activation status from `docker info` JSON output.
 - Normalizing Compose configuration with `docker compose -f <file> config`.
@@ -51,6 +61,17 @@ The module is responsible for:
    `stdout` as JSON, reads `Swarm.LocalNodeState`, and returns `{ active: true, nodeId }` only when
    the local node state is `active`. Failed commands, invalid JSON, or inactive states return
    `{ active: false }`.
+8. `shutdownService` (in `service.ts`) validates the service name against the Swarm name pattern,
+   returns `would-scale` without executing in dry-run mode, otherwise runs
+   `docker service scale <name>=0` and maps the result. Failed commands return `error`; a "No such
+   service" stderr additionally flags the target as `missing`.
+9. `checkStackHealth` (in `health.ts`) runs `dockerStackServices` and `dockerStackPs` per stack,
+   parses one JSON object per line, computes `running`/`desired` from the `Replicas` field, and
+   collects tasks whose `CurrentState` starts with `Failed` or `Rejected`. A service is unhealthy
+   when the parsed replica counts differ (including running above desired) or it has failed tasks.
+   Malformed JSON lines and unparseable `Replicas` values fail closed: they are recorded in
+   `HealthCheckResult.errors` and mark the affected stack and overall result unhealthy, so the CLI
+   exits nonzero. Query failures are handled the same way.
 
 ## Integration Points
 

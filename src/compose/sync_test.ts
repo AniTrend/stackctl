@@ -171,3 +171,47 @@ Deno.test("sync: handles repo with no stacks gracefully", async () => {
     await Deno.remove(tmp, { recursive: true });
   }
 });
+
+Deno.test("sync: respects stack.skipDirectories from config", async () => {
+  const tmp = await Deno.makeTempDir({ prefix: "stackctl-sync-test-" });
+  const config = [
+    "project: test-project",
+    "stack:",
+    "  directory: stacks",
+    "  names:",
+    "    - platform",
+    "  network: traefik-public",
+    "  skipDirectories:",
+    "    - vendor",
+    "render:",
+    "  outputDirectory: .rendered",
+  ].join("\n");
+  await Deno.writeTextFile(`${tmp}/.stackctl`, config);
+
+  // A compose file inside the ignored directory
+  await Deno.mkdir(`${tmp}/vendor`, { recursive: true });
+  await Deno.writeTextFile(
+    `${tmp}/vendor/docker-compose.yml`,
+    [
+      "x-stack: vendored",
+      "services:",
+      "  tool:",
+      "    image: busybox",
+    ].join("\n"),
+  );
+
+  const origCwd = Deno.cwd;
+  try {
+    Deno.cwd = () => tmp;
+    const result = await sync({});
+    // The ignored stack must not be discovered, so there is nothing to sync
+    assertEquals(result.errors.length, 0);
+    assertEquals(result.warnings.length, 1);
+    assertStringIncludes(result.warnings[0], "No stacks discovered");
+    assertEquals(result.match, true);
+    assertEquals(Object.keys(result.diffs).length, 0);
+  } finally {
+    Deno.cwd = origCwd;
+    await Deno.remove(tmp, { recursive: true });
+  }
+});

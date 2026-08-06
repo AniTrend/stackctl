@@ -440,7 +440,10 @@ export async function deployPipeline(
   // ------------------------------------------------------------------
   try {
     // Discover stacks
-    const discovery = await discoverComposeFiles({ repoRoot });
+    const discovery = await discoverComposeFiles({
+      repoRoot,
+      skipDirs: config.base.stack.skipDirectories,
+    });
     const targetStacks = affectedStacks.filter((s) => Object.keys(discovery.stacks).includes(s));
 
     if (targetStacks.length === 0) {
@@ -468,6 +471,7 @@ export async function deployPipeline(
       repoRoot,
       outputDir: undefined,
       dryRun: true, // in-memory only
+      skipDirs: config.base.stack.skipDirectories,
     };
 
     const genResult = await generateStacks(genOptions);

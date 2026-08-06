@@ -9,6 +9,7 @@ import {
   dockerComposeConfig,
   dockerInfo,
   dockerServiceLogs,
+  dockerServiceScale,
   dockerStackDeploy,
   dockerStackPs,
   dockerStackRm,
@@ -161,6 +162,47 @@ Deno.test("dockerStackPs: uses JSON format for machine parsing", async () => {
 
   assertEquals(result.code, 0);
   assertStringIncludes(result.stdout, "Running");
+});
+
+// ---------------------------------------------------------------------------
+// dockerServiceScale
+// ---------------------------------------------------------------------------
+
+Deno.test("dockerServiceScale: scales to zero by default", async () => {
+  const runner = FakeProcessRunnerBuilder.forCommand(
+    ["docker", "service", "scale", "traefik_web=0"],
+    { stdout: "traefik_web scaled to 0", code: 0 },
+  ).build();
+
+  const result = await dockerServiceScale(runner, "traefik_web");
+
+  assertEquals(result.code, 0);
+  assertStringIncludes(result.stdout, "scaled");
+  assertEquals(runner.containsCommand(["docker", "service", "scale"]), true);
+});
+
+Deno.test("dockerServiceScale: uses explicit replica count", async () => {
+  const runner = FakeProcessRunnerBuilder.forCommand(
+    ["docker", "service", "scale", "traefik_web=3"],
+    { code: 0 },
+  ).build();
+
+  const result = await dockerServiceScale(runner, "traefik_web", 3);
+
+  assertEquals(result.code, 0);
+});
+
+Deno.test("dockerServiceScale: reports failure for missing service", async () => {
+  const runner = FakeProcessRunnerBuilder.forCommand(
+    ["docker", "service", "scale", "missing_svc=0"],
+    { stderr: "No such service: missing_svc", code: 1 },
+  ).build();
+
+  const result = await dockerServiceScale(runner, "missing_svc");
+
+  assertEquals(result.code, 1);
+  assert(!result.success);
+  assertStringIncludes(result.stderr, "No such service");
 });
 
 // ---------------------------------------------------------------------------

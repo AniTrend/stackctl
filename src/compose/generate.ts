@@ -36,6 +36,8 @@ export interface GenerateOptions {
   dryRun?: boolean;
   /** Optional override files to apply after source composition. */
   overrides?: (OverrideEntry | string)[];
+  /** Extra directories to skip during discovery (from stack.skipDirectories). */
+  skipDirs?: string[];
 }
 
 export interface GenerateResult {
@@ -74,7 +76,10 @@ export async function generateStacks(
   };
 
   // 1. Discover all compose files
-  const discovery = await discoverComposeFiles({ repoRoot: options.repoRoot });
+  const discovery = await discoverComposeFiles({
+    repoRoot: options.repoRoot,
+    skipDirs: options.skipDirs,
+  });
 
   for (const err of discovery.errors) {
     result.warnings.push(`Discovery error at ${err.path}: ${err.message}`);

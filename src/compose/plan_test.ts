@@ -307,6 +307,78 @@ Deno.test("planOperation — error when config is missing", async () => {
   }
 });
 
+Deno.test("planOperation — respects stack.skipDirectories from config", async () => {
+  const repoRoot = await makeTempDir();
+  await writeFile(
+    repoRoot,
+    ".stackctl",
+    [
+      "project: test-project",
+      "stack:",
+      "  directory: stacks",
+      "  names:",
+      "    - test-stack",
+      "  network: test-net",
+      "  skipDirectories:",
+      "    - vendor",
+      "render:",
+      "  outputDirectory: .rendered",
+    ].join("\n"),
+  );
+
+  await writeFile(
+    repoRoot,
+    "services/test-app/docker-compose.yml",
+    [
+      "x-stack: test-stack",
+      "",
+      "services:",
+      "  app:",
+      "    image: nginx:alpine",
+    ].join("\n"),
+  );
+
+  // A compose file inside the ignored directory
+  await writeFile(
+    repoRoot,
+    "vendor/docker-compose.yml",
+    [
+      "x-stack: vendored",
+      "",
+      "services:",
+      "  tool:",
+      "    image: busybox",
+    ].join("\n"),
+  );
+
+  const originalCwd = Deno.cwd();
+  Deno.chdir(repoRoot);
+
+  try {
+    const result = await planOperation({
+      operation: "generate",
+    });
+
+    assertEquals(result.errors.length, 0);
+
+    const discoverySection = result.sections.find((s) => s.title === "Compose Discovery")!;
+    const items = discoverySection.items.join("\n");
+    // The ignored stack must not be discovered
+    assertStringIncludes(items, "test-stack");
+    assertEquals(items.includes("vendored"), false);
+    // The skip list is reported in the discovery section
+    assertStringIncludes(items, "skipDirectories");
+    assertStringIncludes(items, "vendor");
+
+    // Generation section only covers the discovered stack
+    const genSection = result.sections.find((s) => s.title === "Stack Generation")!;
+    assertEquals(genSection.items.join("\n").includes("vendored"), false);
+  } finally {
+    Deno.chdir(originalCwd);
+    await Deno.remove(repoRoot, { recursive: true });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Stable JSON shape tests
 // ---------------------------------------------------------------------------

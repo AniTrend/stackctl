@@ -22,6 +22,8 @@ import {
   dockerStackServices,
   dockerSwarmStatus,
 } from "../docker/mod.ts";
+import { checkStackHealth } from "../docker/health.ts";
+import { shutdownService } from "../docker/service.ts";
 import {
   batchCreateEnvs,
   diffEnvFiles,
@@ -74,7 +76,10 @@ async function completeStackNames(): Promise<string[]> {
   try {
     const config = await resolveConfig({ profile: undefined, cwd: Deno.cwd() });
     const repoRoot = config.base.repoRoot ?? Deno.cwd();
-    const discovery = await discoverComposeFiles({ repoRoot });
+    const discovery = await discoverComposeFiles({
+      repoRoot,
+      skipDirs: config.base.stack.skipDirectories,
+    });
     return Object.keys(discovery.stacks);
   } catch {
     return [];
@@ -169,6 +174,7 @@ export function buildCli(): Command {
 
         const config = await resolveConfig({ profile, cwd: Deno.cwd() });
         const repoRoot = config.base.repoRoot ?? Deno.cwd();
+        const skipDirs = config.base.stack.skipDirectories;
 
         // Parse override file paths
         const overrideFiles = options.override
@@ -183,6 +189,7 @@ export function buildCli(): Command {
           outputDir: options.outputDir as string | undefined,
           dryRun,
           overrides: overrideFiles,
+          skipDirs,
         };
 
         const result = await generateStacks(genOptions);
@@ -253,6 +260,7 @@ export function buildCli(): Command {
           overrides: options.override
             ? (options.override as string).split(",").map((s: string) => s.trim())
             : undefined,
+          skipDirs: config.base.stack.skipDirectories,
         });
 
         if (genResult.errors.length > 0) {
@@ -349,7 +357,10 @@ export function buildCli(): Command {
         const runner = new RealProcessRunner(dryRun ?? false);
 
         // 1. Discover or use specified stacks
-        const discovery = await discoverComposeFiles({ repoRoot });
+        const discovery = await discoverComposeFiles({
+          repoRoot,
+          skipDirs: config.base.stack.skipDirectories,
+        });
         const targetStacks = stacks ?? Object.keys(discovery.stacks);
 
         if (targetStacks.length === 0) {
@@ -365,6 +376,7 @@ export function buildCli(): Command {
           outputDir: undefined,
           dryRun: true,
           overrides: overrides,
+          skipDirs: config.base.stack.skipDirectories,
         });
 
         for (const w of genResult.warnings) console.error(`warning: ${w}`);
@@ -494,7 +506,10 @@ export function buildCli(): Command {
         const config = await resolveConfig({ profile, cwd: Deno.cwd() });
         const repoRoot = config.base.repoRoot ?? Deno.cwd();
 
-        const discovery = await discoverComposeFiles({ repoRoot });
+        const discovery = await discoverComposeFiles({
+          repoRoot,
+          skipDirs: config.base.stack.skipDirectories,
+        });
         const targetStacks = options.stacks
           ? (options.stacks as string).split(",").map((s: string) => s.trim())
           : Object.keys(discovery.stacks);
@@ -531,6 +546,70 @@ export function buildCli(): Command {
       }
     });
 
+  // --- service (service-level lifecycle) ---
+  //
+  // Registered as a standalone Command instance: Cliffy 1.2.1 does not
+  // attach subcommands correctly when chained off the command returned by
+  // `cli.command(name, description)`, so the group is built separately and
+  // handed to the root tree (same pattern as CompletionsCommand).
+  const serviceCmd = new Command()
+    .name("service")
+    .description("Manage individual Swarm services.");
+
+  // service shutdown
+  serviceCmd.command(
+    "shutdown",
+    "Scale a Swarm service down to zero replicas.\n" +
+      "Accepts an exact, full Docker Swarm service name (e.g. traefik_web).\n" +
+      "The service definition is kept; only its replicas are scaled to 0.\n" +
+      "Use --dry-run to preview without executing, and --yes to skip the\n" +
+      "confirmation prompt.",
+  )
+    .arguments("<service:string>")
+    .option("--yes", "Skip confirmation prompt.")
+    .option("--dry-run", "Print planned action without executing.")
+    .action(async (options: Record<string, unknown>, serviceName: string) => {
+      try {
+        const dryRun = options.dryRun as boolean | undefined;
+        const skipConfirm = options.yes as boolean | undefined;
+
+        // Confirmation prompt
+        if (!dryRun && !skipConfirm) {
+          console.log("The following service will be scaled to 0 replicas:");
+          console.log(`  - ${serviceName}`);
+          const answer = prompt("Proceed? [y/N] ");
+          if (!answer || answer.toLowerCase() !== "y") {
+            console.log("Aborted.");
+            return;
+          }
+        }
+
+        const runner = new RealProcessRunner(false);
+        const result = await shutdownService({ runner, serviceName, dryRun });
+
+        if (result.action === "scaled") {
+          console.log(`Scaled down: ${result.serviceName} (0 replicas)`);
+        } else if (result.action === "would-scale") {
+          console.log(`[dry-run] would scale ${result.serviceName} to 0 replicas`);
+          console.log(`[dry-run] docker service scale ${result.serviceName}=0`);
+        } else if (result.action === "invalid") {
+          console.error(`error: ${result.error}`);
+          exitCode = ExitCode.UserConfigError;
+        } else {
+          console.error(
+            `error scaling ${result.serviceName}: ${result.error}` +
+              (result.missing ? " (service not found)" : ""),
+          );
+          exitCode = ExitCode.DriftOrValidation;
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        exitCode = ExitCode.UnexpectedError;
+      }
+    });
+
+  cli.command("service", serviceCmd);
+
   // --- status (issue #6) ---
   cli.command("status", "Show stack service status.")
     .option("--json", "Output JSON machine-readable status.")
@@ -544,7 +623,10 @@ export function buildCli(): Command {
         const config = await resolveConfig({ profile, cwd: Deno.cwd() });
         const repoRoot = config.base.repoRoot ?? Deno.cwd();
 
-        const discovery = await discoverComposeFiles({ repoRoot });
+        const discovery = await discoverComposeFiles({
+          repoRoot,
+          skipDirs: config.base.stack.skipDirectories,
+        });
         const targetStacks = options.stacks
           ? (options.stacks as string).split(",").map((s: string) => s.trim())
           : Object.keys(discovery.stacks);
@@ -601,6 +683,75 @@ export function buildCli(): Command {
       }
     });
 
+  // --- health ---
+  //
+  // Read-only evaluation of deployed stack health. Unhealthy services are
+  // detected from desired/running replica mismatch and failed/rejected task
+  // states. This command never mutates Swarm state; it only reports.
+  cli.command("health", "Evaluate deployed stack health from Swarm service and task state.")
+    .option("--stacks <names:string>", "Comma-separated list of stack names to evaluate.")
+    .option("--profile <name:string>", "Use a specific profile.")
+    .option("--json", "Output machine-readable JSON.")
+    .action(async (options: Record<string, unknown>) => {
+      try {
+        const profile = options.profile as string | undefined;
+        const jsonOutput = options.json as boolean | undefined;
+
+        const config = await resolveConfig({ profile, cwd: Deno.cwd() });
+        const repoRoot = config.base.repoRoot ?? Deno.cwd();
+
+        const discovery = await discoverComposeFiles({
+          repoRoot,
+          skipDirs: config.base.stack.skipDirectories,
+        });
+        const targetStacks = options.stacks
+          ? (options.stacks as string).split(",").map((s: string) => s.trim())
+          : Object.keys(discovery.stacks);
+
+        if (targetStacks.length === 0) {
+          console.log(jsonOutput ? "{}" : "No stacks discovered.");
+          return;
+        }
+
+        const runner = new RealProcessRunner(false);
+        const result = await checkStackHealth({ runner, stacks: targetStacks });
+
+        for (const err of result.errors) {
+          console.error(`error evaluating ${err.stack}: ${err.message}`);
+        }
+
+        if (jsonOutput) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          for (const stack of result.stacks) {
+            console.log(`\n=== ${stack.stack} ===`);
+            for (const svc of stack.services) {
+              if (svc.unhealthy) {
+                console.log(`  \u2717 ${svc.name} (${svc.running}/${svc.desired})`);
+                for (const r of svc.reasons) {
+                  console.log(`      ${r}`);
+                }
+              } else {
+                console.log(`  \u2713 ${svc.name} (${svc.running}/${svc.desired})`);
+              }
+            }
+            if (stack.services.length === 0) {
+              console.log("  (no services)");
+            }
+          }
+        }
+
+        if (result.unhealthy) {
+          exitCode = ExitCode.DriftOrValidation;
+        } else if (!jsonOutput) {
+          console.log("\nAll evaluated stacks are healthy.");
+        }
+      } catch (err: unknown) {
+        console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+        exitCode = ExitCode.UnexpectedError;
+      }
+    });
+
   // --- logs (issue #6) ---
   cli.command("logs", "Follow service logs.")
     .arguments("[services...:string]")
@@ -634,7 +785,10 @@ export function buildCli(): Command {
           ? (options.stacks as string).split(",").map((s: string) => s.trim())
           : undefined;
 
-        const discovery = await discoverComposeFiles({ repoRoot });
+        const discovery = await discoverComposeFiles({
+          repoRoot,
+          skipDirs: config.base.stack.skipDirectories,
+        });
         const targetStacks = stacks ?? Object.keys(discovery.stacks);
 
         for (const stackName of targetStacks) {

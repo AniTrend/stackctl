@@ -144,15 +144,20 @@ function planConfig(config: ResolvedConfig): PlanSection {
 async function planComposeDiscovery(
   repoRoot: string,
   targetStacks?: string[],
+  skipDirs?: string[],
 ): Promise<PlanSection> {
   const items: string[] = [];
   const detail: Record<string, unknown> = {};
 
-  const discovery = await discoverComposeFiles({ repoRoot });
+  const discovery = await discoverComposeFiles({ repoRoot, skipDirs });
   const stacks = targetStacks ?? Object.keys(discovery.stacks);
 
   items.push(`Repository root: ${repoRoot}`);
   items.push(`Stacks discovered: ${Object.keys(discovery.stacks).length}`);
+
+  if (skipDirs && skipDirs.length > 0) {
+    items.push(`Skipped directories (stack.skipDirectories): ${skipDirs.join(", ")}`);
+  }
 
   if (stacks.length === 0) {
     items.push("  (no stacks found)");
@@ -207,6 +212,7 @@ async function planGeneration(
   repoRoot: string,
   targetStacks: string[],
   overrideEntries: (OverrideEntry | string)[],
+  skipDirs?: string[],
 ): Promise<PlanSection> {
   const items: string[] = [];
   const detail: Record<string, unknown> = {};
@@ -218,6 +224,7 @@ async function planGeneration(
     outputDir: undefined,
     dryRun: true,
     overrides: overrideEntries,
+    skipDirs,
   });
 
   items.push(
@@ -556,6 +563,7 @@ export async function planOperation(
 
   const repoRoot = config.base.repoRoot ?? Deno.cwd();
   const outputDir = config.base.render?.outputDirectory ?? ".rendered";
+  const skipDirs = config.base.stack.skipDirectories;
 
   // Build the JSON config block with resolved layers
   result.json.config = {
@@ -570,7 +578,7 @@ export async function planOperation(
   result.sections.push(planConfig(config));
 
   // 2. Compose discovery
-  const discoverySection = await planComposeDiscovery(repoRoot, opts.stacks);
+  const discoverySection = await planComposeDiscovery(repoRoot, opts.stacks, skipDirs);
   result.sections.push(discoverySection);
 
   // Determine target stacks
@@ -608,6 +616,7 @@ export async function planOperation(
       repoRoot,
       targetStacks,
       overrideEntries,
+      skipDirs,
     );
     result.sections.push(genSection);
 
@@ -628,6 +637,7 @@ export async function planOperation(
       outputDir: undefined,
       dryRun: true,
       overrides: overrideEntries,
+      skipDirs,
     });
     const renderSection = await planRender(
       genResult.generated,

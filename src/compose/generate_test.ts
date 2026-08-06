@@ -529,3 +529,44 @@ Deno.test("generateStacks + render: each service reads its own env file", async 
 
   await Deno.remove(tmp, { recursive: true });
 });
+
+Deno.test("generateStacks: skips directories from skipDirs option", async () => {
+  const tmp = await makeTempDir();
+  await createFixture(tmp);
+
+  // An ignored stack that must not be discovered or generated
+  await Deno.mkdir(`${tmp}/vendor`, { recursive: true });
+  await writeFile(
+    `${tmp}/vendor`,
+    "docker-compose.yml",
+    [
+      "x-stack: vendored",
+      "",
+      "services:",
+      "  tool:",
+      "    image: busybox",
+      "",
+    ].join("\n"),
+  );
+
+  const result = await generateStacks({
+    stacks: ["platform"],
+    repoRoot: tmp,
+    dryRun: true,
+    skipDirs: ["vendor"],
+  });
+
+  assertEquals(result.errors, []);
+  assertEquals(Object.keys(result.generated), ["platform"]);
+
+  // The ignored directory is skipped even when generating all stacks
+  const all = await generateStacks({
+    repoRoot: tmp,
+    dryRun: true,
+    skipDirs: ["vendor"],
+  });
+  assertEquals(Object.keys(all.generated), ["platform"]);
+  assertEquals(all.errors, []);
+
+  await Deno.remove(tmp, { recursive: true });
+});

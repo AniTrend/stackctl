@@ -42,8 +42,9 @@ export async function sync(opts: SyncOptions): Promise<SyncResult> {
 
   const repoRoot = config.base.repoRoot ?? Deno.cwd();
   const stacksDir = join(repoRoot, config.base.stack.directory);
+  const skipDirs = config.base.stack.skipDirectories;
 
-  const discovery = await discoverComposeFiles({ repoRoot });
+  const discovery = await discoverComposeFiles({ repoRoot, skipDirs });
   const targetStacks = opts.stacks ?? Object.keys(discovery.stacks);
 
   if (targetStacks.length === 0) {
@@ -56,6 +57,7 @@ export async function sync(opts: SyncOptions): Promise<SyncResult> {
     repoRoot,
     outputDir: undefined,
     dryRun: true,
+    skipDirs,
   });
 
   for (const w of genResult.warnings) result.warnings.push(w);
